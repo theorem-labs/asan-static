@@ -54,6 +54,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: the pinned commits are the Dockerfile's bases
+        run: |
+          set -euo pipefail
+          musl_base=$(sed -n 's/^ARG MUSL_BASE=//p' toolchain/Dockerfile)
+          llvm_base=$(sed -n 's/^ARG LLVM_BASE=//p' toolchain/Dockerfile)
+          [[ -n "$musl_base" && $MUSL_COMMIT == "$musl_base"* ]] || { echo "::error::MUSL_COMMIT does not match the Dockerfile's MUSL_BASE ($musl_base)"; exit 1; }
+          [[ -n "$llvm_base" && $LLVM_COMMIT == "$llvm_base"* ]] || { echo "::error::LLVM_COMMIT does not match the Dockerfile's LLVM_BASE ($llvm_base)"; exit 1; }
+
       - name: upstream sources, from earlier runs
         id: restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -67,10 +75,6 @@ jobs:
         if: steps.restore.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          musl_base=$(sed -n 's/^ARG MUSL_BASE=//p' toolchain/Dockerfile)
-          llvm_base=$(sed -n 's/^ARG LLVM_BASE=//p' toolchain/Dockerfile)
-          [[ -n "$musl_base" && $MUSL_COMMIT == "$musl_base"* ]] || { echo "::error::MUSL_COMMIT does not match the Dockerfile's MUSL_BASE ($musl_base)"; exit 1; }
-          [[ -n "$llvm_base" && $LLVM_COMMIT == "$llvm_base"* ]] || { echo "::error::LLVM_COMMIT does not match the Dockerfile's LLVM_BASE ($llvm_base)"; exit 1; }
           fetch() {  # dir url commit: the one commit, no checkout (the build reads it with git archive)
             git init -q "$1"
             git -C "$1" fetch -q --depth 1 "$2" "$3"
