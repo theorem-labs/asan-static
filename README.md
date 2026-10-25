@@ -303,7 +303,7 @@ build, CI links a program with `asan-musl.cfg` and checks that the binary has no
 `PT_INTERP`, no `DT_NEEDED` and no dynamic symbol table. riscv64 is built with the
 arguments of the OSS-Fuzz proofs' toolchain, except that `VERIFY_RUNTIME` stays
 `require`. Runs reuse Docker's layer cache from earlier runs on `main`; the weekly run
-uses no cache and rebuilds everything.
+uses no layer cache and rebuilds everything.
 
 ## Not included
 
