@@ -34,7 +34,10 @@ The snapshot differs from asan-static in three ways:
   comment edits keep the number of lines the same, so no line number in the patched
   sources moves.
 - `toolchain/Dockerfile` pins the Alpine packages by series (`~x.y`) instead of exactly
-  (`=x.y.z-rN`), with a comment that says why (see "Pinned versions").
+  (`=x.y.z-rN`), with a comment that says why (see "Pinned versions"). Since
+  2026-10-25 the packages it fetches for the target architecture (section 0a of the
+  Dockerfile) also accept any Alpine build number of their pinned version, because
+  Alpine replaced `musl-1.2.5-r12` with `r13` and the exact pin stopped the build.
 
 Both patch series apply with `patch -p1 --fuzz=0` to the pinned bases. The source
 trees that result from the two series differ in six comment lines of two files, and in

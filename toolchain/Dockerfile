@@ -244,9 +244,12 @@ RUN set -eu; \
 # The versions are pinned by assertion rather than by constraint: `apk fetch
 # pkg=1.2-r3` does not resolve at all when --arch names another architecture, so
 # each package is fetched by name and the file it produced is then required to be
-# the expected one.  That pins it exactly as the apk add above does -- a moved
-# package stops the build here -- and it also keeps the two lists honest, since
-# linux-headers appears in both and has to say the same version in both.
+# the expected upstream version, with any Alpine build number (-rN).  That is the
+# same `~series` rule the apk add above follows, for the same reason: Alpine keeps
+# only the newest build, so an exact -rN stops resolving the day Alpine rebuilds
+# the package (measured 2026-10-25: musl-1.2.5-r12 gone, r13 current).  A moved
+# upstream version still stops the build here, and linux-headers, which appears
+# in both lists, still has to say the same version in both.
 # ---------------------------------------------------------------------------
 ARG TARGET_PKGS=/opt/target-pkgs
 RUN set -eu; \
@@ -255,9 +258,10 @@ RUN set -eu; \
     apk="apk --arch $APK_ARCH --keys-dir $keys --no-cache"; \
     mkdir -p "$TARGET_PKGS" /tmp/apks; \
     $apk fetch -o /tmp/apks linux-headers libstdc++-dev clang20 musl gcc; \
-    for p in linux-headers-6.14.2-r0 libstdc++-dev-14.2.0-r6 clang20-20.1.8-r0 \
-             musl-1.2.5-r12 gcc-14.2.0-r6; do \
-      [ -f "/tmp/apks/$p.apk" ] || { echo "expected $p.apk for $APK_ARCH, got:"; ls /tmp/apks; exit 1; }; \
+    for p in linux-headers-6.14.2 libstdc++-dev-14.2.0 clang20-20.1.8 \
+             musl-1.2.5 gcc-14.2.0; do \
+      set -- /tmp/apks/"$p"-r*.apk; \
+      [ -f "$1" ] || { echo "expected $p-r*.apk for $APK_ARCH, got:"; ls /tmp/apks; exit 1; }; \
     done; \
     tar -C "$TARGET_PKGS" -xzf /tmp/apks/linux-headers-*.apk usr; \
     tar -C "$TARGET_PKGS" -xzf /tmp/apks/libstdc++-dev-*.apk usr; \
