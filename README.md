@@ -1,6 +1,6 @@
 # static-asan
 
-[![CI](https://github.com/theorem-labs/static-asan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/theorem-labs/static-asan/actions/workflows/ci.yml?query=branch%3Amain)
+[![CI](https://github.com/theorem-labs/asan-static/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/theorem-labs/asan-static/actions/workflows/ci.yml?query=branch%3Amain)
 
 AddressSanitizer (ASan) for fully static binaries against musl libc.
 

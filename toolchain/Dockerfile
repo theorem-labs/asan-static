@@ -244,12 +244,12 @@ RUN set -eu; \
 # The versions are pinned by assertion rather than by constraint: `apk fetch
 # pkg=1.2-r3` does not resolve at all when --arch names another architecture, so
 # each package is fetched by name and the file it produced is then required to be
-# the expected upstream version, with any Alpine build number (-rN).  That is the
-# same `~series` rule the apk add above follows, for the same reason: Alpine keeps
-# only the newest build, so an exact -rN stops resolving the day Alpine rebuilds
-# the package (measured 2026-10-25: musl-1.2.5-r12 gone, r13 current).  A moved
-# upstream version still stops the build here, and linux-headers, which appears
-# in both lists, still has to say the same version in both.
+# the expected upstream version, with any Alpine build number (-rN).  The reason
+# is the one the `~series` pins of the apk add above give: Alpine keeps only the
+# newest build, so an exact -rN stops resolving the day Alpine rebuilds the
+# package (measured 2026-10-25: musl-1.2.5-r12 gone, r13 current).  This check
+# is narrower than those pins: a new upstream version, not only a new series,
+# stops the build here.
 # ---------------------------------------------------------------------------
 ARG TARGET_PKGS=/opt/target-pkgs
 RUN set -eu; \
