@@ -1,5 +1,7 @@
 # static-asan
 
+[![CI](https://github.com/theorem-labs/static-asan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/theorem-labs/static-asan/actions/workflows/ci.yml?query=branch%3Amain)
+
 AddressSanitizer (ASan) for fully static binaries against musl libc.
 
 A binary built with this toolchain has no `PT_INTERP`, no `DT_NEEDED` and no
@@ -286,6 +288,19 @@ These cases are not affected:
 
 Later versions of asan-static replace the spin with `SIGABRT`. This snapshot does not
 include that change, because the OSS-Fuzz proofs' binaries were built without it.
+
+## CI
+
+The [CI](.github/workflows/ci.yml) workflow builds the image for each of the four
+targets on each push to `main`, on each pull request and once a week. The last steps of
+`toolchain/Dockerfile` are the tests. A static musl binary runs, a static ASan binary
+reports an overflow that only a live interceptor can report, and a link without the
+wrap list fails. The cross targets run these steps under `qemu-user`. After the
+build, CI links a program with `asan-musl.cfg` and checks that the binary has no
+`PT_INTERP`, no `DT_NEEDED` and no dynamic symbol table. riscv64 is built with the
+arguments of the OSS-Fuzz proofs' toolchain, except that `VERIFY_RUNTIME` stays
+`require`. Runs reuse Docker's layer cache from earlier runs on `main`; the weekly run
+uses no cache and rebuilds everything.
 
 ## Not included
 

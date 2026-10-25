@@ -1,0 +1,150 @@
+# ci.yml: build the toolchain image for each target and check it.
+#
+# Each job builds toolchain/Dockerfile for one target, as README.md's "Building"
+# says, from the pinned musl and llvm-project commits.  The Dockerfile's own last
+# steps are the tests: a static musl binary runs, a static ASan binary reports an
+# overflow that only a live interceptor can report, and a link without the wrap
+# list fails (section 6 of the Dockerfile).  The cross targets run those steps
+# under qemu-user.  After the build, one more step links hello world with
+# asan-musl.cfg and requires that the binary has no PT_INTERP, no DT_NEEDED and no
+# dynamic symbol table.
+#
+# riscv64 is built with the arguments of the OSS-Fuzz proofs' toolchain (README.md,
+# "Building"), except VERIFY_RUNTIME, which stays at its default, "require".
+#
+# Caches, which make a run faster and never change what is built:
+#   - the two upstream repositories, fetched at the pinned commits only, keyed by
+#     those commits;
+#   - BuildKit's layer cache, per target.  BuildKit reuses a layer only when the
+#     Dockerfile step, its build arguments and the files it reads are the same.
+#     Only a push to main writes it; a pull request reads it and writes nothing.
+# The weekly run reads no layer cache, so it rebuilds everything, and it resolves
+# the `~series` Alpine pins again (README.md, "Pinned versions").
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+defaults:
+  run:
+    shell: bash
+env:
+  # The pinned bases.  The Dockerfile names them by prefix (MUSL_BASE, LLVM_BASE);
+  # the "sources" step fails if these do not start with those prefixes.
+  MUSL_COMMIT: f21a96538f78fa8e2040831b4209b35f2fb581da
+  LLVM_COMMIT: 87f0227cb60147a26a1eeb4fb06e3b505e9c7261
+
+jobs:
+  toolchain:
+    name: toolchain (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            triple: x86_64-unknown-linux-musl
+            musl_target: x86_64-linux-musl
+            qemu: ""
+            target_cflags: ""
+          - arch: aarch64
+            triple: aarch64-unknown-linux-musl
+            musl_target: aarch64-linux-musl
+            qemu: arm64
+            target_cflags: ""
+          - arch: riscv64
+            triple: riscv64-unknown-linux-musl
+            musl_target: riscv64-linux-musl
+            qemu: riscv64
+            target_cflags: "-march=rv64g -mabi=lp64d -ffunction-sections -fdata-sections"
+          - arch: armv7
+            triple: armv7-unknown-linux-musleabihf
+            musl_target: armv7-linux-musleabihf
+            qemu: arm
+            target_cflags: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: free disk space
+        # The build and the loaded image need more than the runner's free 14 GB.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: upstream sources, from earlier runs
+        id: sources-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/musl
+            ${{ runner.temp }}/llvm-project
+          key: sources-musl-${{ env.MUSL_COMMIT }}-llvm-${{ env.LLVM_COMMIT }}
+
+      - name: sources
+        run: |
+          set -euo pipefail
+          musl_base=$(sed -n 's/^ARG MUSL_BASE=//p' toolchain/Dockerfile)
+          llvm_base=$(sed -n 's/^ARG LLVM_BASE=//p' toolchain/Dockerfile)
+          [[ -n "$musl_base" && $MUSL_COMMIT == "$musl_base"* ]] || { echo "::error::MUSL_COMMIT does not match the Dockerfile's MUSL_BASE ($musl_base)"; exit 1; }
+          [[ -n "$llvm_base" && $LLVM_COMMIT == "$llvm_base"* ]] || { echo "::error::LLVM_COMMIT does not match the Dockerfile's LLVM_BASE ($llvm_base)"; exit 1; }
+          fetch() {  # dir url commit: the one commit, no checkout (the build reads it with git archive)
+            if [ -d "$1/.git" ] && git -C "$1" cat-file -e "$3^{commit}" 2>/dev/null; then return; fi
+            rm -rf "$1"; git init -q "$1"
+            git -C "$1" fetch -q --depth 1 "$2" "$3"
+          }
+          fetch "$RUNNER_TEMP/musl" https://git.musl-libc.org/git/musl "$MUSL_COMMIT"
+          fetch "$RUNNER_TEMP/llvm-project" https://github.com/llvm/llvm-project "$LLVM_COMMIT"
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+        if: matrix.qemu != ''
+        with:
+          platforms: ${{ matrix.qemu }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: build the toolchain image (its last steps are the tests)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: toolchain
+          file: toolchain/Dockerfile
+          build-contexts: |
+            musl-src=${{ runner.temp }}/musl
+            llvm-src=${{ runner.temp }}/llvm-project
+            patches=patches
+          build-args: |
+            TRIPLE=${{ matrix.triple }}
+            MUSL_TARGET=${{ matrix.musl_target }}
+            APK_ARCH=${{ matrix.arch }}
+            TARGET_CFLAGS=${{ matrix.target_cflags }}
+          tags: tc-asan-musl:ci
+          load: true
+          no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: ${{ github.event_name != 'schedule' && format('type=gha,scope=toolchain-{0}', matrix.arch) || '' }}
+          cache-to: ${{ github.event_name == 'push' && format('type=gha,mode=max,scope=toolchain-{0}', matrix.arch) || '' }}
+
+      - name: a static ASan binary is fully static
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          printf '#include <stdio.h>\nint main(void){puts("hello");return 0;}\n' > "$dir/hello.c"
+          docker run --rm -v "$dir:/w" -w /w tc-asan-musl:ci \
+            clang --config=/opt/asan-static/asan-musl.cfg hello.c -o hello
+          readelf -lW "$dir/hello" > "$dir/phdrs"
+          readelf -dW "$dir/hello" > "$dir/dynamic"
+          readelf --dyn-syms -W "$dir/hello" > "$dir/dynsyms"
+          ! grep -q INTERP "$dir/phdrs" || { echo "::error::the binary has a PT_INTERP"; cat "$dir/phdrs"; exit 1; }
+          ! grep -q NEEDED "$dir/dynamic" || { echo "::error::the binary has a DT_NEEDED"; cat "$dir/dynamic"; exit 1; }
+          ! grep -q . "$dir/dynsyms" || { echo "::error::the binary has a dynamic symbol table"; cat "$dir/dynsyms"; exit 1; }
+          grep -q __asan_init <(readelf -sW "$dir/hello") || { echo "::error::the binary has no ASan runtime"; exit 1; }
+          echo "no PT_INTERP, no DT_NEEDED, no dynamic symbol table; ASan runtime linked"
