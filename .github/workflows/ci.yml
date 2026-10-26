@@ -47,7 +47,7 @@ defaults:
 env:
   # The pinned bases.  The Dockerfile names them by prefix (MUSL_BASE, LLVM_BASE);
   # the sources job fails if these do not start with those prefixes.
-  MUSL_COMMIT: f21a96538f78fa8e2040831b4209b35f2fb581da
+  MUSL_COMMIT: 0021a96538f78fa8e2040831b4209b35f2fb581da
   LLVM_COMMIT: 87f0227cb60147a26a1eeb4fb06e3b505e9c7261
 
 jobs:
