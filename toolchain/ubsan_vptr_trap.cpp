@@ -24,11 +24,17 @@
 // handler prints nothing, makes no syscall, allocates nothing and has no
 // global constructor.
 //
-// Two differences from compiler-rt.  It does not check that the vtable prefix
-// is readable memory, so a vptr that points at unmapped memory faults in the
-// handler where compiler-rt reports.  And it compares type_info objects by
-// address or by the address of their names, which is exact in one statically
-// linked image, where each type has one type_info.
+// Two differences from compiler-rt.  It tests each address it is about to read
+// against the program's own image, where compiler-rt calls
+// IsAccessibleMemoryRange, which writes the address to a pipe: this handler
+// makes no syscall, and a statically linked program holds every vtable and
+// every type_info it can reach inside its image, so the bound is exact here and
+// asks the kernel nothing.  An address outside the image is a mismatch, and
+// traps, where reading it would fault.  The object's own storage is still read
+// without a test, as compiler-rt reads it, so an object whose own page is
+// unmapped faults in either.  And it compares type_info objects by address or
+// by the address of their names, which is exact in one statically linked image,
+// where each type has one type_info.
 //
 // It reads RTTI, so it is compiled with RTTI, and the code it checks must be
 // too: clang emits no vptr check in a translation unit built with -fno-rtti.
@@ -58,11 +64,24 @@ typedef uintptr_t HashValue;
 static const unsigned VptrTypeCacheSize = 128;
 static const long VptrMaxOffsetToTop = 1 << 20;
 
+// The ends of the program's image, from the linker.  Every vtable and every
+// type_info of a static link lies between them.
+extern "C" const char __executable_start[];
+extern "C" const char _end[];
+
 // The symbol the compiler emits the fast-path cache probe against.
 extern "C" HashValue __ubsan_vptr_type_cache[VptrTypeCacheSize];
 HashValue __ubsan_vptr_type_cache[VptrTypeCacheSize];
 
 namespace {
+// Whether an address the handler is about to read belongs to the image.  A
+// freed object's stale vptr, and a wild one, point at the heap, at the stack or
+// at nothing; each is outside the image, so the read does not happen and the
+// handler traps instead of faulting.
+bool in_image(const void *p, unsigned long size) {
+  const char *c = static_cast<const char *>(p);
+  return c >= __executable_start && c <= _end - size;
+}
 // Mangled names of the three Itanium RTTI node kinds (libc++abi/libstdc++ share
 // them).  Classifying by name sidesteps a cross-TU dynamic_cast, whose private
 // type_info identity would not match libc++abi's own nodes.
@@ -75,6 +94,9 @@ bool typeinfo_eq(const std::type_info *a, const std::type_info *b) {
 }
 bool isDerivedFromAtOffset(const abi::__class_type_info *Derived,
                            const abi::__class_type_info *Base, long Offset) {
+  // Every node of the walk is read, so every node must be in the image.
+  if (!in_image(Derived, sizeof(abi::__vmi_class_type_info)))
+    return false;
   if (typeinfo_eq(Derived, Base))
     return Offset == 0;
   const char *k = typeid(*Derived).name();  // real embedded type_info; string-compare
@@ -101,7 +123,12 @@ bool isDerivedFromAtOffset(const abi::__class_type_info *Derived,
 struct VtablePrefix { long Offset; std::type_info *TypeInfo; };
 bool checkDynamicType(void *Object, void *Type, HashValue Hash) {
   void *VtablePtr = *reinterpret_cast<void **>(Object);
+  // The vtable, and the prefix in front of it, must be in the image.
+  if (!in_image(VtablePtr, 0))
+    return false;
   VtablePrefix *Prefix = reinterpret_cast<VtablePrefix *>(VtablePtr) - 1;
+  if (!in_image(Prefix, sizeof(VtablePrefix)))
+    return false;
   if (!Prefix->TypeInfo) return false;
   if (Prefix->Offset < -VptrMaxOffsetToTop || Prefix->Offset > VptrMaxOffsetToTop)
     return false;
