@@ -25,14 +25,14 @@ This is asan-static commit `385966a2672b4be07efec847baee1dd5e497b25f`, the toolc
 binaries in Theorem Labs' OSS-Fuzz proofs: asan-static `a408805db578be529ff2923ddee5a608ba9753d2`
 plus musl patch 0003, which keeps a static program's TLS block in `.bss` and replaces musl
 patch 0002. It is a fresh snapshot of that commit's `toolchain/` and `patches/`, without
-asan-static's history, plus five compiler-rt patches (`0024`–`0028`) that add
+asan-static's history, plus six compiler-rt patches (`0024`–`0029`) that add
 MemorySanitizer support to the sealed static toolchain and are not part of asan-static
 `385966a2`; they are described below and in the patch table.
 
 The snapshot differs from asan-static in four ways:
 
-- The `From:` line of each patch names Theorem Labs, except the five MSan patches
-  `0024`–`0028`.
+- The `From:` line of each patch names Theorem Labs, except the six MSan patches
+  `0024`–`0029`.
 - Internal references removed from commit messages and from source comments. The
   comment edits keep the number of lines the same, so no line number in the patched
   sources moves.
@@ -41,18 +41,18 @@ The snapshot differs from asan-static in four ways:
   2026-10-25 the packages it fetches for the target architecture (section 0a of the
   Dockerfile) also accept any Alpine build number of their pinned version, because
   Alpine replaced `musl-1.2.5-r12` with `r13` and the exact pin stopped the build.
-- Five compiler-rt patches, `0024`–`0028`, add MemorySanitizer support: link-time interception
+- Six compiler-rt patches, `0024`–`0029`, add MemorySanitizer support: link-time interception
   and a wrap list for `libclang_rt.msan.a`, the musl `rlimit64` and `FILE` fixes MSan
-  needs, and a sealed start-up for MSan. They change only the MSan runtime
-  (`compiler-rt/lib/msan/*`) and two build files, `gen_wrap_list.py` and
+  needs, a sealed start-up for MSan, and an MSan runtime for riscv64. They change only the
+  MSan runtime (`compiler-rt/lib/msan/*`), two build files, `gen_wrap_list.py` and
   `add_sanitizer_rt_wrap_list` in `SanitizerUtils.cmake`, whose output for ASan is
-  byte-identical. No shared runtime source is touched —
+  byte-identical, and the MSan line of `AllSupportedArchDefs.cmake`. No shared runtime source is touched —
   `sanitizer_platform_limits_posix.h` in particular is unchanged — so the ASan, TSan,
   HWASan and UBSan archives, and the md5 below, do not move. `toolchain/Dockerfile`
   also builds the MSan configs and a smoke test for them (sections 5b and 6).
 
 Both patch series apply with `patch -p1 --fuzz=0` to the pinned bases. Excluding the
-five MSan patches, which asan-static does not carry, the source trees that result from
+six MSan patches, which asan-static does not carry, the source trees that result from
 the two series differ in six comment lines of two files, and in nothing else: five in
 `compiler-rt/lib/asan/asan_new_delete.cpp` (patch 0023) and one in
 `compiler-rt/lib/sanitizer_common/sanitizer_sealed.h` (patch 0019).
@@ -184,15 +184,18 @@ detail.
 binary. That binary reserves about 14TiB of shadow memory on a 64-bit target. If the
 Docker daemon sets an `RLIMIT_AS` that is smaller, the binary cannot start. With
 `defer`, the image contains `/opt/asan-static/RUNTIME-UNVERIFIED`, which records that
-the check did not run. The MemorySanitizer check on x86_64 and aarch64 follows the
+the check did not run. The MemorySanitizer check on x86_64, aarch64 and riscv64 follows the
 same rule: when no run of one of its binaries passes under a set `RLIMIT_AS`, and the
 runs that missed could not map MSan's shadow (plain) or spun (sealed), `require`
-fails the build and `defer` appends that binary to `RUNTIME-UNVERIFIED`. A cross
-build that runs the target's binaries under `qemu-user` does not run the MSan
-binaries at all, because MSan's fixed layout does not hold under the emulator. That
-is a deferral too: `require` fails the build and `defer` appends it to
-`RUNTIME-UNVERIFIED`. riscv64 and armv7 have no MSan runtime and skip the MSan check
-entirely.
+fails the build and `defer` appends that binary to `RUNTIME-UNVERIFIED`. On riscv64 the
+same misses are a deferral also without an `RLIMIT_AS`, because riscv64's MSan layout
+cannot be held on Sv39 hardware or under `qemu-user` 8.1 or 8.2 (see "Running an
+emulated image"). A cross
+build of x86_64 or aarch64 that runs the target's binaries under `qemu-user` does not
+run the MSan binaries at all, because their fixed layout does not hold under the
+emulator. That is a deferral too: `require` fails the build and `defer` appends it to
+`RUNTIME-UNVERIFIED`. A riscv64 cross build runs them under the emulator. armv7 has no
+MSan runtime and skips the MSan check entirely.
 
 ### Using the image
 
@@ -214,14 +217,19 @@ The image installs these clang config files in `/opt/asan-static/`:
 | `asan-musl-silent.cfg` | `asan-musl.cfg` with silent reports (patch 0014) |
 | `asan-musl-dynamic.cfg` | ordinary dynamic ASan with the stock runtime |
 | `asan-musl-nowrap.cfg`, `asan-musl-bfd.cfg` | two incorrect static links, for tests that require the link to fail |
-| `msan-musl.cfg` | static musl with the static MSan runtime and `libclang_rt.msan.a.wrap` (x86_64 and aarch64 only) |
-| `msan-musl-sealed.cfg` | `msan-musl.cfg` with sealed init (patches 0026 and 0027; x86_64 and aarch64 only) |
+| `msan-musl.cfg` | static musl with the static MSan runtime and `libclang_rt.msan.a.wrap` (x86_64, aarch64 and riscv64) |
+| `msan-musl-sealed.cfg` | `msan-musl.cfg` with sealed init (patches 0026 and 0027; x86_64, aarch64 and riscv64) |
 
 The sealed and silent configs use the same runtime archive as `asan-musl.cfg`. Each
 adds one `--defsym` to the link. `msan-musl-sealed.cfg` likewise uses the same
 runtime archive and wrap list as `msan-musl.cfg` and adds one `--defsym`. The MSan
-configs exist only on the targets for which compiler-rt 20.1.8 builds an MSan
-runtime.
+configs exist only on the targets for which compiler-rt 20.1.8, with patch 0029, builds
+an MSan runtime. On riscv64 both MSan configs also pass
+`-mllvm -msan-xor-mask=0x500000000000 -mllvm -msan-origin-base=0x100000000000`: Alpine's
+clang 20.1.8 has no MSan mapping for riscv64, and these options give its MSan pass the
+mapping that llvm/llvm-project#235906 adds, the one patch 0029 gives the runtime. Section
+5b of the Dockerfile says what was measured. A riscv64 compile with `-fsanitize=memory`
+that does not use the configs needs the same two options.
 
 `asan-musl.cfg`, `asan-musl-sealed.cfg` and `asan-musl-silent.cfg` compile and link C++
 against a second libc++ and libc++abi, built with ASan, in
@@ -291,16 +299,17 @@ pinned to `$BUILDPLATFORM`, and the three arguments above name the target. You d
 need target hardware or an emulator to build the image.
 
 Six verification steps at the end of the Dockerfile run target binaries; one of them,
-the MemorySanitizer check, runs them only on x86_64 and aarch64, and on riscv64 and armv7,
-which have no MSan config, it skips and prints "no msan test". On a cross build, the
+the MemorySanitizer check, runs them only on x86_64, aarch64 and riscv64, and on armv7,
+which has no MSan config, it skips and prints "no msan test". On a cross build, the
 build machine must be able to run them. On Linux, register `qemu-user` with
 `binfmt_misc` for the target, for example with the `qemu-user-static` package or with
 `docker run --privileged tonistiigi/binfmt --install <arch>`. Only these six steps
-need the emulator. The MSan check detects the emulator and does not run its binaries
-under it. With the default `VERIFY_RUNTIME=require` that fails the build; with
-`VERIFY_RUNTIME=defer` the check records them in
+need the emulator. On x86_64 and aarch64 the MSan check detects the emulator and does
+not run its binaries under it. With the default `VERIFY_RUNTIME=require` that fails the
+build; with `VERIFY_RUNTIME=defer` the check records them in
 `/opt/asan-static/RUNTIME-UNVERIFIED` instead. Build aarch64 on an aarch64 machine to
-have MSan checked.
+have MSan checked. On riscv64 the MSan check runs its binaries under the emulator, which
+must be `qemu-user` 9.2 or later (see "Running an emulated image").
 
 `--build-arg TOOLCHAIN_PLATFORM=linux/<arch> --platform linux/<arch>` builds the
 image on the target architecture under emulation instead. This gives the same
@@ -321,6 +330,16 @@ architecture and run under emulation:
 ASan on riscv64 also needs a large address space. The primary allocator reserves
 128GB, and the shadow reservation is larger. Give the container an `RLIMIT_AS` that
 is not small.
+
+MSan on riscv64 needs a 47-bit user address space: its layout (patch 0029) is
+LoongArch64's, with the primary allocator at `0x700000000000`, which fits Sv48 and not
+Sv39, so on riscv64 hardware an Sv39 kernel cannot run it. Under `qemu-user` it also
+needs the emulator to map the program above MSan's shadow, which version 9.2 and later
+do. Measured: `qemu-riscv64` 8.1.5 and 8.2.2 (Ubuntu 24.04's `qemu-user-static`) answer
+a program's first `mmap(NULL)` with `0x2aaaab2ad000`, inside MSan's shadow, so a plain
+MSan binary stops with "can not mmap the shadow" and a sealed one spins; under 9.2.0,
+9.2.2, 10.0.4, 10.0.11, 10.1.3 and 10.2.3 both run. 9.0 and 9.1 were not tried. CI
+installs `tonistiigi/binfmt:latest`, which held 10.2.3 when this was written.
 
 ## Binary size
 
@@ -372,6 +391,7 @@ through the same interceptor as before.
 | `compiler-rt/0026` | Sealed: `__msan_init` records its frame like `__asan_init`. On x86_64/aarch64 this sets the top of the sealed main-thread stack window that `MsanThread::Init`'s `CHECK(AddrIsInStack())` reads; without it that check failed in 6 of 80 sealed runs (x86_64). |
 | `compiler-rt/0027` | Sealed: gives MSan a sealed start-up. At the top of `__msan_init`, before the runtime's first mapping, it reserves the shadow, origin, invalid and allocator ranges, and the allocator's region-info array above them, with `MAP_FIXED_NOREPLACE` and spins on refusal (like asan's `SealedReserveShadow`); it pins the common flags asan's `SealFlags` pins, `clear_shadow_mmap_threshold` included, so no signal handler is installed, a detection dies by `SIGABRT` and the shadow is never re-mapped; it creates the symbolizer only when a report needs it, so start-up does not look for `llvm-symbolizer`; and it makes `ReExec` unreachable. |
 | `compiler-rt/0028` | MSan-only: turns `SANITIZER_HAS_STRUCT_FILE` off under `SANITIZER_MUSL` inside `msan_interceptors.cpp` (not the shared header), so `unpoison_file` is a no-op on musl without rebuilding any other runtime. |
+| `compiler-rt/0029` | Builds the MSan runtime for riscv64 on LoongArch64's 47-bit (Sv48) layout: the runtime half of llvm/llvm-project#235906. The compiler half is not patched in; the riscv64 MSan configs pass the same mapping to Alpine's clang as `-mllvm` options (Dockerfile section 5b). No other runtime archive changes. |
 
 ## Known limitation: the sealed runtime spins when it cannot get memory
 
@@ -424,7 +444,7 @@ targets on each push to `main`, on each pull request and once a week. The last s
 `toolchain/Dockerfile` are the tests. A static musl binary runs, a static ASan binary
 reports an overflow that only a live interceptor can report, a link without the wrap
 list fails, and a sealed ASan C++ program reports a `std::string` container-overflow
-while a correct one does not. On x86_64 and aarch64 an MSan step follows: it runs a clean program
+while a correct one does not. On x86_64, aarch64 and riscv64 an MSan step follows: it runs a clean program
 and an uninitialized-read program, each linked plain and sealed, twelve times each,
 requires at least one pass of each and accepts no outcome other than a pass or a
 known miss (the sealed spin above, or the re-exec that the build's seccomp profile
@@ -433,7 +453,8 @@ list fails. Then the hardened libc++ traps on a broken precondition and the defa
 does not, and the vptr handler traps on a bad downcast while a correct program runs and a
 link without it fails. x86_64 and aarch64 build on runners of their own architecture
 (`ubuntu-24.04` and `ubuntu-24.04-arm`), so these steps run natively. riscv64 and
-armv7 are cross-built on x86_64 and run their steps under `qemu-user`. After the
+armv7 are cross-built on x86_64 and run their steps under `qemu-user`, riscv64's MSan
+step included. After the
 build, CI links a program with `asan-musl.cfg` and checks that the binary has no
 `PT_INTERP`, no `DT_NEEDED` and no dynamic symbol table, and checks that the image
 has no `RUNTIME-UNVERIFIED`. riscv64 is built with the

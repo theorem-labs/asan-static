@@ -1,0 +1,92 @@
+From 087a4d3b5fe3d4dcd03cec54fbfe380239d92347 Mon Sep 17 00:00:00 2001
+From: 0xalpharush <87383155+0xalpharush@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 06:00:00 +0000
+Subject: [PATCH] [compiler-rt] msan: build the runtime for riscv64, on
+ LoongArch64's layout
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+🤖: compiler-rt 20.1.8 builds msan only for the architectures in
+ALL_MSAN_SUPPORTED_ARCH, and riscv64 is not one of them, so a riscv64 image of
+this toolchain has no libclang_rt.msan.a and section 5b emits no MSan config.
+This is the runtime half of llvm/llvm-project#235906 ("[msan] Add
+MemorySanitizer support for riscv64 Linux", open at bcd884d5), backported to
+20.1.8:
+
+  - AllSupportedArchDefs.cmake: riscv64 joins ALL_MSAN_SUPPORTED_ARCH.  The
+    hunk differs from #235906's only in context: 20.1.8's list has no HEXAGON.
+  - msan.h: riscv64 takes LoongArch64's kMemoryLayout, MEM_TO_SHADOW
+    (xor 0x500000000000) and SHADOW_TO_ORIGIN (+0x100000000000).  #235906's
+    hunk, except that its two-line #elif is written on one line, so that no
+    line of msan.h moves.
+  - msan_allocator.cpp: riscv64 takes LoongArch64's AP64 -- the primary at
+    0x700000000000, 4 TiB, kMaxAllowedMallocSize 8 GiB.  #235906's hunk.
+
+The layout is LoongArch64's 47-bit one, so it is written for riscv64's Sv48
+(a 128 TiB user address space); there is no room for it on Sv39.
+
+The compiler half of #235906 -- a riscv64 case in MemorySanitizer::
+initializeModule -- is not in the Alpine clang 20.1.8 this image compiles
+with, and this series does not change the compiler.  Section 5b of
+toolchain/Dockerfile instead puts the same constants into the riscv64 MSan
+configs as -mllvm -msan-xor-mask / -msan-origin-base, which initializeModule
+honours before it looks at the triple; what that rests on, and what was
+measured, is written there.
+
+Only MSan sources and the MSan arch list change.  Measured against the
+toolchain without this patch: on riscv64 every runtime archive that was
+already built (libclang_rt.asan.a among them, md5 4880198f as README.md
+records) is byte-identical, and libclang_rt.msan.a and libclang_rt.msan_cxx.a
+are new.  On x86_64 every archive except the two msan ones is byte-identical;
+those two differ only in the DWARF 5 md5_checksum that .debug_line records for
+msan.h and msan_allocator.cpp, whose text changed -- with the stripped debug
+sections every member is byte-identical, and the line tables are otherwise
+equal because no line moved.
+---
+ compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake | 2 +-
+ compiler-rt/lib/msan/msan.h                          | 4 ++--
+ compiler-rt/lib/msan/msan_allocator.cpp              | 2 +-
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake b/compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake
+index ee5be276f..228b4eb0a 100644
+--- a/compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake
++++ b/compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake
+@@ -70,7 +70,7 @@ if (OS_NAME MATCHES "FreeBSD")
+   set(ALL_MSAN_SUPPORTED_ARCH ${X86_64} ${ARM64})
+ else()
+   set(ALL_MSAN_SUPPORTED_ARCH ${X86_64} ${MIPS64} ${ARM64} ${PPC64} ${S390X}
+-      ${LOONGARCH64})
++      ${LOONGARCH64} ${RISCV64})
+ endif()
+ set(ALL_NSAN_SUPPORTED_ARCH ${X86_64})
+ set(ALL_HWASAN_SUPPORTED_ARCH ${X86_64} ${ARM64} ${RISCV64})
+diff --git a/compiler-rt/lib/msan/msan.h b/compiler-rt/lib/msan/msan.h
+index 8a1dd0bbf..bcea2eaf2 100644
+--- a/compiler-rt/lib/msan/msan.h
++++ b/compiler-rt/lib/msan/msan.h
+@@ -96,8 +96,8 @@ const MappingDesc kMemoryLayout[] = {
+ # define MEM_TO_SHADOW(mem) ((uptr)mem ^ 0xB00000000000ULL)
+ # define SHADOW_TO_ORIGIN(shadow) (((uptr)(shadow)) + 0x200000000000ULL)
+ 
+-#elif SANITIZER_LINUX && SANITIZER_LOONGARCH64
+-// LoongArch64 maps:
++#elif SANITIZER_LINUX && (SANITIZER_LOONGARCH64 || (defined(__riscv) && (__riscv_xlen == 64)))
++// LoongArch64 and RISC-V (Sv48) share this 47-bit layout. LoongArch64 maps:
+ // - 0x000000000000-0x010000000000: Program own segments
+ // - 0x555500000000-0x555600000000: PIE program segments
+ // - 0x7fff00000000-0x7fffffffffff: libraries segments.
+diff --git a/compiler-rt/lib/msan/msan_allocator.cpp b/compiler-rt/lib/msan/msan_allocator.cpp
+index 5d6ac4c2b..328fb1674 100644
+--- a/compiler-rt/lib/msan/msan_allocator.cpp
++++ b/compiler-rt/lib/msan/msan_allocator.cpp
+@@ -86,7 +86,7 @@ struct AP64 {  // Allocator64 parameters. Deliberately using a short name.
+ 
+ using PrimaryAllocator = SizeClassAllocator64<AP64>;
+ 
+-#elif defined(__loongarch_lp64)
++#elif defined(__loongarch_lp64) || (defined(__riscv) && (__riscv_xlen == 64))
+ const uptr kAllocatorSpace = 0x700000000000ULL;
+ const uptr kMaxAllowedMallocSize = 8UL << 30;
+ 

@@ -4,12 +4,14 @@
 # says, from the pinned musl and llvm-project commits.  The Dockerfile's own last
 # steps are the tests: a static musl binary runs, a static ASan binary reports an
 # overflow that only a live interceptor can report, a link without the wrap list
-# fails, and on x86_64 and aarch64 the static MSan binaries, plain and sealed, run
-# and report (section 6 of the Dockerfile).  x86_64 and aarch64 each build on a
-# runner of their own architecture, so those steps run natively: MSan cannot run
-# under qemu-user, and an emulated MSan step fails the build under the default
-# VERIFY_RUNTIME=require.  riscv64 and armv7 are cross-built on x86_64
-# and run their steps under qemu-user; they have no MSan runtime.  After the
+# fails, and on x86_64, aarch64 and riscv64 the static MSan binaries, plain and
+# sealed, run and report (section 6 of the Dockerfile).  x86_64 and aarch64 each
+# build on a runner of their own architecture, so those steps run natively: their
+# MSan cannot run under qemu-user, and an emulated MSan step fails the build under
+# the default VERIFY_RUNTIME=require.  riscv64 and armv7 are cross-built on x86_64
+# and run their steps under qemu-user, riscv64's MSan step included (it needs
+# qemu-user 9.2 or later; setup-qemu-action installs tonistiigi/binfmt qemu-v10.2.3),
+# and armv7 has no MSan runtime.  After the
 # build, one step links hello world with asan-musl.cfg and requires that the
 # binary has no PT_INTERP, no DT_NEEDED and no dynamic symbol table, and another
 # requires that the image records nothing as unverified
@@ -210,6 +212,7 @@ jobs:
         if: matrix.qemu != ''
         with:
           platforms: ${{ matrix.qemu }}
+          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0  # qemu-v10.2.3
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
