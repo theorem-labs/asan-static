@@ -1,6 +1,6 @@
-# static-asan
+# asan-static
 
-[![CI](https://github.com/theorem-labs/static-asan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/theorem-labs/static-asan/actions/workflows/ci.yml?query=branch%3Amain)
+[![CI](https://github.com/theorem-labs/asan-static/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/theorem-labs/asan-static/actions/workflows/ci.yml?query=branch%3Amain)
 
 AddressSanitizer (ASan) for fully static binaries against musl libc.
 
@@ -21,15 +21,22 @@ The runtime does not use `dlsym`.
 
 ## Provenance
 
-This is asan-static commit `385966a2672b4be07efec847baee1dd5e497b25f`, the toolchain for the
-binaries in Theorem Labs' OSS-Fuzz proofs: asan-static `a408805db578be529ff2923ddee5a608ba9753d2`
-plus musl patch 0003, which keeps a static program's TLS block in `.bss` and replaces musl
-patch 0002. It is a fresh snapshot of that commit's `toolchain/` and `patches/`, without
-asan-static's history, plus five compiler-rt patches (`0024`–`0028`) that add
-MemorySanitizer support to the sealed static toolchain and are not part of asan-static
-`385966a2`; they are described below and in the patch table.
+The name of this repository was static-asan. GitHub redirects the old URLs, `git` URLs
+included, to this repository.
 
-The snapshot differs from asan-static in four ways:
+archive-asan-static holds the earlier history of this toolchain. It is archived and not
+public, and it is no longer where the toolchain is developed: that work happens here.
+
+This is archive-asan-static commit `385966a2672b4be07efec847baee1dd5e497b25f`, the toolchain
+for the binaries in Theorem Labs' OSS-Fuzz proofs: archive-asan-static
+`a408805db578be529ff2923ddee5a608ba9753d2` plus musl patch 0003, which keeps a static
+program's TLS block in `.bss` and replaces musl patch 0002. It is a fresh snapshot of that
+commit's `toolchain/` and `patches/`, without archive-asan-static's history, plus five
+compiler-rt patches (`0024`–`0028`) that add MemorySanitizer support to the sealed static
+toolchain and are not part of archive-asan-static `385966a2`; they are described below and
+in the patch table.
+
+The snapshot differs from archive-asan-static in four ways:
 
 - The `From:` line of each patch names Theorem Labs, except the five MSan patches
   `0024`–`0028`.
@@ -52,7 +59,7 @@ The snapshot differs from asan-static in four ways:
   also builds the MSan configs and a smoke test for them (sections 5b and 6).
 
 Both patch series apply with `patch -p1 --fuzz=0` to the pinned bases. Excluding the
-five MSan patches, which asan-static does not carry, the source trees that result from
+five MSan patches, which archive-asan-static does not carry, the source trees that result from
 the two series differ in six comment lines of two files, and in nothing else: five in
 `compiler-rt/lib/asan/asan_new_delete.cpp` (patch 0023) and one in
 `compiler-rt/lib/sanitizer_common/sanitizer_sealed.h` (patch 0019).
@@ -99,16 +106,16 @@ riscv64 command under "Building" gives that md5. A build of this repository at a
 gives `4880198ff493a316727c4cc1d4f78e21`, the same on a second build without the Docker
 cache; the archives differ only in `.debug_line`, as described above.
 
-Musl patch 0003 changes `libc.a`, not the runtime. A build of asan-static 385966a2 itself
+Musl patch 0003 changes `libc.a`, not the runtime. A build of archive-asan-static 385966a2 itself
 gives the same `libclang_rt.asan.a`, md5 `91ba024da5ddacd96dc1c7588e5763b3`, and a build of
 this repository gives the same `4880198ff493a316727c4cc1d4f78e21` as at a408805d. Against
-the asan-static 385966a2 build, this repository's musl sysroot (`libc.a`, the start-up
+the archive-asan-static 385966a2 build, this repository's musl sysroot (`libc.a`, the start-up
 objects, libunwind, libc++ and libc++abi: 21 files) is byte-identical, and the runtime
 archives differ only in `.debug_line`, as above. The sysroot also holds a second libc++
 and libc++abi, built with ASan, in `usr/lib/asan-libcxx`, and a third, built with libc++'s
 extensive hardening mode, in `usr/lib/hardened-libcxx`. The image also holds a trap-only
 `-fsanitize=vptr` handler, `/opt/ubsan-vptr-trap/libclang_rt.ubsan_vptr_trap.a`, built from
-`toolchain/ubsan_vptr_trap.cpp`. asan-static 385966a2 has no counterpart to any of the three.
+`toolchain/ubsan_vptr_trap.cpp`. archive-asan-static 385966a2 has no counterpart to any of the three.
 Only the static ASan configs use the ASan copy, only `musl-hardened.cfg` uses the hardened
 copy, and only `ubsan-vptr-musl.cfg` uses the handler (see "Using the image").
 
@@ -395,7 +402,7 @@ These cases are not affected:
   or NULL with `allocator_may_return_null=1`.
 - Binaries that are not sealed behave as upstream ASan does.
 
-Later versions of asan-static replace the spin with `SIGABRT`. This snapshot does not
+Later versions in archive-asan-static replace the spin with `SIGABRT`. This snapshot does not
 include that change, because the OSS-Fuzz proofs' binaries were built without it.
 
 A binary linked with `msan-musl-sealed.cfg` also spins, with no output, when one of
@@ -443,7 +450,7 @@ uses no layer cache and rebuilds everything.
 
 ## Not included
 
-Upstream asan-static also has an end-to-end test suite (`tests/`) and conformance
+archive-asan-static also has an end-to-end test suite (`tests/`) and conformance
 checks (`conformance/`) that compare compiler-rt's description of musl with musl's
 headers. They are not part of this snapshot. Some comments and commit messages refer
 to them, and to test case names in them.
