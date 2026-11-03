@@ -1,7 +1,7 @@
 # Patch series
 
 What `toolchain/Dockerfile` applies with `patch -p1 --fuzz=0` to trees taken from the
-pinned base commits, in sorted order: two musl patches (0001 and 0003; 0002 is retired) and twenty-eight against compiler-rt. What
+pinned base commits, in sorted order: two musl patches (0001 and 0003; 0002 is retired) and twenty-nine against compiler-rt. What
 each does is in the table in the top-level [README](../README.md) and, at length, in each
 patch's own commit message. `--fuzz=0` is deliberate -- after a base bump a hunk that no
 longer matches must fail rather than apply at a plausible-looking offset.

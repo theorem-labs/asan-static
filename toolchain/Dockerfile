@@ -1486,6 +1486,113 @@ RUN set -eu; \
       echo "std::string container-overflow is reported; a correct program does not report"; \
     fi
 
+# ...and that a static ASan program's qsort_r and qsort calls go through an
+# interceptor (patch 0029).  musl defines qsort_r, so a qsort_r call must get
+# the check of the whole array that the interceptor makes under glibc.
+#
+# One source, built twice (-DQSORT_R for qsort_r, without it for qsort), sorts 9
+# ints of a 16-int heap block.  Before the sort it poisons ints 8 to 15 with
+# __asan_poison_memory_region, so the sort covers one poisoned element.  The
+# block is real memory, so only an ASan check can object to the sort.  Two
+# other checks must stay silent, so that the report can come only from the
+# interceptor's WRITE_RANGE check of the whole array:
+#   - libc's own memcpy calls are wrapped too, so a sort that moves the
+#     poisoned element reports from memcpy inside musl's sift().  The ints are
+#     already in order (a[i] = i), and musl's smoothsort moves nothing for
+#     input that is already sorted: sift() and trinkle() stop at their first
+#     comparison, and cycle() returns for fewer than two elements.
+#   - The comparator is no_sanitize("address"), so its reads of the poisoned
+#     element do not report from the program's own code.
+#
+# The qsort_r build must report a WRITE of size 36 from the qsort_r interceptor
+# called by main.  Without 0029 it reports nothing, because the call goes
+# straight to musl.  The qsort build must report the same WRITE from a qsort
+# interceptor.  With 0029 that is the qsort_r one, reached from the qsort one,
+# and a tail call can drop the qsort frame, so either name passes.
+#
+# A third program sorts 1000 ints with qsort_r (descending, through the
+# comparator's own argument, so the interceptor must pass that argument on)
+# and with qsort, and must print "sort ok" and exit 0.  The three programs run
+# only when the interceptor check above could run its binary.
+RUN set -eu; \
+    printf '%s\n' \
+      '#define _GNU_SOURCE' \
+      '#include <stdio.h>' \
+      '#include <stdlib.h>' \
+      'void __asan_poison_memory_region(void const volatile *, size_t);' \
+      '__attribute__((no_sanitize("address")))' \
+      'static int cmp_r(const void *a, const void *b, void *arg) {' \
+      '  int x = *(const int *)a, y = *(const int *)b;' \
+      '  (void)arg;' \
+      '  return (x > y) - (x < y);' \
+      '}' \
+      '__attribute__((no_sanitize("address")))' \
+      'static int cmp(const void *a, const void *b) { return cmp_r(a, b, 0); }' \
+      'int main(void) {' \
+      '  int *a = malloc(16 * sizeof *a);' \
+      '  for (int i = 0; i < 16; i++) a[i] = i;' \
+      '  __asan_poison_memory_region(a + 8, 8 * sizeof *a);' \
+      '#ifdef QSORT_R' \
+      '  qsort_r(a, 9, sizeof *a, cmp_r, 0);' \
+      '#else' \
+      '  qsort(a, 9, sizeof *a, cmp);' \
+      '#endif' \
+      '  puts("not reported");' \
+      '  return 0;' \
+      '}' \
+      > /tmp/sort-over.c; \
+    printf '%s\n' \
+      '#define _GNU_SOURCE' \
+      '#include <stdio.h>' \
+      '#include <stdlib.h>' \
+      'static int cmp_r(const void *a, const void *b, void *arg) {' \
+      '  int x = *(const int *)a, y = *(const int *)b;' \
+      '  return *(const int *)arg * ((x > y) - (x < y));' \
+      '}' \
+      'static int cmp(const void *a, const void *b) {' \
+      '  int x = *(const int *)a, y = *(const int *)b;' \
+      '  return (x > y) - (x < y);' \
+      '}' \
+      'int main(void) {' \
+      '  int n = 1000, down = -1;' \
+      '  int *a = malloc(n * sizeof *a), *b = malloc(n * sizeof *b);' \
+      '  for (int i = 0; i < n; i++) a[i] = b[i] = i * 7919 % n;' \
+      '  qsort_r(a, n, sizeof *a, cmp_r, &down);' \
+      '  qsort(b, n, sizeof *b, cmp);' \
+      '  for (int i = 0; i < n; i++)' \
+      '    if (a[i] != n - 1 - i || b[i] != i) { puts("misordered"); return 1; }' \
+      '  free(a);' \
+      '  free(b);' \
+      '  puts("sort ok");' \
+      '  return 0;' \
+      '}' \
+      > /tmp/sort-ok.c; \
+    clang --config=/opt/asan-static/asan-musl.cfg -g -DQSORT_R /tmp/sort-over.c -o /tmp/qsort_r-over; \
+    clang --config=/opt/asan-static/asan-musl.cfg -g /tmp/sort-over.c -o /tmp/qsort-over; \
+    clang --config=/opt/asan-static/asan-musl.cfg -g /tmp/sort-ok.c -o /tmp/sort-ok; \
+    if [ -e /opt/asan-static/RUNTIME-UNVERIFIED ]; then \
+      echo "qsort_r and qsort interception: built, not run (RUNTIME-UNVERIFIED)"; \
+    else \
+      { ASAN_OPTIONS=detect_leaks=0 /tmp/qsort_r-over 2>&1 || true; } > /tmp/qsort_r-over.log; \
+      { ASAN_OPTIONS=detect_leaks=0 /tmp/qsort-over 2>&1 || true; } > /tmp/qsort-over.log; \
+      if ! grep -q "WRITE of size 36" /tmp/qsort_r-over.log \
+         || ! grep -qE "#0 .*qsort_r .*sanitizer_common_interceptors\.inc" /tmp/qsort_r-over.log \
+         || ! grep -qE "#[0-9]+ .* in main .*sort-over\.c" /tmp/qsort_r-over.log; then \
+        echo "qsort_r over a poisoned element did not report from the qsort_r interceptor:" >&2; \
+        cat /tmp/qsort_r-over.log >&2; \
+        exit 1; \
+      fi; \
+      if ! grep -q "WRITE of size 36" /tmp/qsort-over.log \
+         || ! grep -qE "#0 .*qsort(_r)? .*sanitizer_common_interceptors\.inc" /tmp/qsort-over.log; then \
+        echo "qsort over a poisoned element did not report from an interceptor:" >&2; \
+        cat /tmp/qsort-over.log >&2; \
+        exit 1; \
+      fi; \
+      out=$(ASAN_OPTIONS=detect_leaks=0 /tmp/sort-ok 2>&1) || { echo "a correct qsort_r and qsort failed:" >&2; echo "$out" >&2; exit 1; }; \
+      [ "$out" = "sort ok" ] || { echo "a correct qsort_r and qsort printed:" >&2; echo "$out" >&2; exit 1; }; \
+      echo "qsort_r and qsort are intercepted and report; a correct sort does not report"; \
+    fi
+
 # MemorySanitizer test, on the targets that have an msan runtime (x86_64 and
 # aarch64; on the others section 5b wrote no msan config and this step says so
 # and does nothing).
