@@ -1493,15 +1493,22 @@ RUN set -eu; \
 # One source, built twice (-DQSORT_R for qsort_r, without it for qsort), sorts 9
 # ints of a 16-int heap block.  Before the sort it poisons ints 8 to 15 with
 # __asan_poison_memory_region, so the sort covers one poisoned element.  The
-# block is real memory, so the uninstrumented libc sort reads and writes it
-# without harm, and only an interceptor's WRITE_RANGE check can report it.  The
-# comparator is no_sanitize("address") for the same reason: its reads of the
-# poisoned element must not report from the program's own code.  The qsort_r
-# build must report a WRITE of size 36 from the qsort_r interceptor called by
-# main.  Without 0029 it reports nothing, because the call goes straight to
-# musl.  The qsort build must report the same WRITE from a qsort interceptor.
-# With 0029 that is the qsort_r one, reached from the qsort one, and a tail call
-# can drop the qsort frame, so either name passes.
+# block is real memory, so only an ASan check can object to the sort.  Two
+# other checks must stay silent, so that the report can come only from the
+# interceptor's WRITE_RANGE check of the whole array:
+#   - libc's own memcpy calls are wrapped too, so a sort that moves the
+#     poisoned element reports from memcpy inside musl's sift().  The ints are
+#     already in order (a[i] = i), and musl's smoothsort moves nothing for
+#     input that is already sorted: sift() and trinkle() stop at their first
+#     comparison, and cycle() returns for fewer than two elements.
+#   - The comparator is no_sanitize("address"), so its reads of the poisoned
+#     element do not report from the program's own code.
+#
+# The qsort_r build must report a WRITE of size 36 from the qsort_r interceptor
+# called by main.  Without 0029 it reports nothing, because the call goes
+# straight to musl.  The qsort build must report the same WRITE from a qsort
+# interceptor.  With 0029 that is the qsort_r one, reached from the qsort one,
+# and a tail call can drop the qsort frame, so either name passes.
 #
 # A third program sorts 1000 ints with qsort_r (descending, through the
 # comparator's own argument, so the interceptor must pass that argument on)
@@ -1523,7 +1530,7 @@ RUN set -eu; \
       'static int cmp(const void *a, const void *b) { return cmp_r(a, b, 0); }' \
       'int main(void) {' \
       '  int *a = malloc(16 * sizeof *a);' \
-      '  for (int i = 0; i < 16; i++) a[i] = 16 - i;' \
+      '  for (int i = 0; i < 16; i++) a[i] = i;' \
       '  __asan_poison_memory_region(a + 8, 8 * sizeof *a);' \
       '#ifdef QSORT_R' \
       '  qsort_r(a, 9, sizeof *a, cmp_r, 0);' \
