@@ -1,0 +1,60 @@
+From c5a32feb4acd8762e7be47a6836513c3003c29af Mon Sep 17 00:00:00 2001
+From: Theorem Labs
+Date: Tue, 3 Nov 2026 06:04:09 +0000
+Subject: [PATCH] [sanitizer_common] intercept qsort_r on musl
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+🤖: Patch 0006 moved the interceptor gates that asked about glibc where musl
+has the function too, but it left SANITIZER_INTERCEPT_QSORT_R at SI_GLIBC.
+musl has had qsort_r since 1.2.3, with glibc's argument order: the
+comparator's third argument is the caller's pointer.  src/stdlib/qsort.c
+defines __qsort_r and exports it with weak_alias(__qsort_r, qsort_r), at
+lines 166 and 229 of the pinned base f21a9653.  With the gate at SI_GLIBC no
+qsort_r interceptor is compiled, so qsort_r is not in the wrap list.  A static
+musl program's qsort_r call then goes straight to libc.  It does not get the
+interceptor's comparator pass over the array, or its
+COMMON_INTERCEPTOR_WRITE_RANGE check of all nmemb * size bytes, as the same
+call does under glibc ASan.
+
+Check musl as well.  gen_wrap_list.py takes the names that libc.a defines,
+weak ones included (nm --defined-only --extern-only), so qsort_r joins the
+wrap list, and REAL(qsort_r) is musl's qsort_r.
+
+This also changes qsort on musl.  With SANITIZER_INTERCEPT_QSORT_R set,
+sanitizer_common_interceptors.inc builds the qsort interceptor that calls
+WRAP(qsort_r) with a null argument.  Until now it built the stand-alone one,
+which keeps the comparator in two thread-local variables and calls
+REAL(qsort).  glibc builds already use the WRAP(qsort_r) version.  musl's own
+qsort is __qsort_r with a comparator adapter (src/stdlib/qsort_nr.c), so
+REAL(qsort_r) sorts as REAL(qsort) did, and a qsort call is checked in the
+same way as before: one comparator pass, then one WRITE_RANGE of the array.
+
+sanitizer_platform_interceptors.h is a shared header.  Every runtime that
+includes sanitizer_common_interceptors.inc changes, the ASan archive and its
+wrap list among them, and the MSan archive and its wrap list too.  A toolchain
+that has this patch is a new toolchain version.  Its libclang_rt.asan.a is not
+the archive that the earlier binaries linked.
+
+Reported in theorem-labs/asan-static#1.
+
+Omp-Session: 01a175dd-5d8a-75ac-99a0-68919637ef66
+---
+ .../lib/sanitizer_common/sanitizer_platform_interceptors.h     | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h b/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h
+index a90b5ff..04b2f27 100644
+--- a/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h
++++ b/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h
+@@ -628,7 +628,8 @@ SANITIZER_WEAK_IMPORT void *aligned_alloc(__sanitizer::usize __alignment,
+    SI_FREEBSD || SI_SOLARIS)
+ #define SANITIZER_INTERCEPT_QSORT \
+   (SI_POSIX && !SI_IOSSIM && !SI_WATCHOS && !SI_TVOS && !SI_ANDROID)
+-#define SANITIZER_INTERCEPT_QSORT_R SI_GLIBC
++// musl has had qsort_r, with glibc's argument order, since 1.2.3.
++#define SANITIZER_INTERCEPT_QSORT_R (SI_GLIBC || SANITIZER_MUSL)
+ #define SANITIZER_INTERCEPT_BSEARCH \
+   (SI_POSIX && !SI_IOSSIM && !SI_WATCHOS && !SI_TVOS && !SI_ANDROID)
+ // sigaltstack on i386 macOS cannot be intercepted due to setjmp()

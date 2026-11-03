@@ -31,12 +31,12 @@ This is archive-asan-static commit `385966a2672b4be07efec847baee1dd5e497b25f`, t
 for the binaries in Theorem Labs' OSS-Fuzz proofs: archive-asan-static
 `a408805db578be529ff2923ddee5a608ba9753d2` plus musl patch 0003, which keeps a static
 program's TLS block in `.bss` and replaces musl patch 0002. It is a fresh snapshot of that
-commit's `toolchain/` and `patches/`, without archive-asan-static's history, plus five
-compiler-rt patches (`0024`–`0028`) that add MemorySanitizer support to the sealed static
-toolchain and are not part of archive-asan-static `385966a2`; they are described below and
-in the patch table.
+commit's `toolchain/` and `patches/`, without archive-asan-static's history, plus six
+compiler-rt patches that are not part of archive-asan-static `385966a2`: five (`0024`–`0028`)
+add MemorySanitizer support to the sealed static toolchain, and one (`0029`) intercepts
+`qsort_r` on musl. They are described below and in the patch table.
 
-The snapshot differs from archive-asan-static in four ways:
+The snapshot differs from archive-asan-static in five ways:
 
 - The `From:` line of each patch names Theorem Labs, except the five MSan patches
   `0024`–`0028`.
@@ -57,9 +57,15 @@ The snapshot differs from archive-asan-static in four ways:
   `sanitizer_platform_limits_posix.h` in particular is unchanged — so the ASan, TSan,
   HWASan and UBSan archives, and the md5 below, do not move. `toolchain/Dockerfile`
   also builds the MSan configs and a smoke test for them (sections 5b and 6).
+- Compiler-rt patch `0029` intercepts `qsort_r` on musl. With it, `qsort` goes through the
+  interceptor that glibc builds use, which calls the `qsort_r` one. The patch changes
+  `sanitizer_platform_interceptors.h`, which every runtime includes, so
+  `libclang_rt.asan.a`, its wrap list, and the MSan archive and its wrap list change. A
+  build that includes `0029` does not give the md5 below. Its binaries are a new toolchain
+  version, not the toolchain of the binaries in the released proofs.
 
 Both patch series apply with `patch -p1 --fuzz=0` to the pinned bases. Excluding the
-five MSan patches, which archive-asan-static does not carry, the source trees that result from
+five MSan patches and patch 0029, which archive-asan-static does not carry, the source trees that result from
 the two series differ in six comment lines of two files, and in nothing else: five in
 `compiler-rt/lib/asan/asan_new_delete.cpp` (patch 0023) and one in
 `compiler-rt/lib/sanitizer_common/sanitizer_sealed.h` (patch 0019).
@@ -108,10 +114,10 @@ cache; the archives differ only in `.debug_line`, as described above.
 
 Musl patch 0003 changes `libc.a`, not the runtime. A build of archive-asan-static 385966a2 itself
 gives the same `libclang_rt.asan.a`, md5 `91ba024da5ddacd96dc1c7588e5763b3`, and a build of
-this repository gives the same `4880198ff493a316727c4cc1d4f78e21` as at a408805d. Against
+this repository before patch 0029 gives the same `4880198ff493a316727c4cc1d4f78e21` as at a408805d. Against
 the archive-asan-static 385966a2 build, this repository's musl sysroot (`libc.a`, the start-up
-objects, libunwind, libc++ and libc++abi: 21 files) is byte-identical, and the runtime
-archives differ only in `.debug_line`, as above. The sysroot also holds a second libc++
+objects, libunwind, libc++ and libc++abi: 21 files) is byte-identical, and before patch 0029
+the runtime archives differ only in `.debug_line`, as above. The sysroot also holds a second libc++
 and libc++abi, built with ASan, in `usr/lib/asan-libcxx`, and a third, built with libc++'s
 extensive hardening mode, in `usr/lib/hardened-libcxx`. The image also holds a trap-only
 `-fsanitize=vptr` handler, `/opt/ubsan-vptr-trap/libclang_rt.ubsan_vptr_trap.a`, built from
@@ -379,6 +385,7 @@ through the same interceptor as before.
 | `compiler-rt/0026` | Sealed: `__msan_init` records its frame like `__asan_init`. On x86_64/aarch64 this sets the top of the sealed main-thread stack window that `MsanThread::Init`'s `CHECK(AddrIsInStack())` reads; without it that check failed in 6 of 80 sealed runs (x86_64). |
 | `compiler-rt/0027` | Sealed: gives MSan a sealed start-up. At the top of `__msan_init`, before the runtime's first mapping, it reserves the shadow, origin, invalid and allocator ranges, and the allocator's region-info array above them, with `MAP_FIXED_NOREPLACE` and spins on refusal (like asan's `SealedReserveShadow`); it pins the common flags asan's `SealFlags` pins, `clear_shadow_mmap_threshold` included, so no signal handler is installed, a detection dies by `SIGABRT` and the shadow is never re-mapped; it creates the symbolizer only when a report needs it, so start-up does not look for `llvm-symbolizer`; and it makes `ReExec` unreachable. |
 | `compiler-rt/0028` | MSan-only: turns `SANITIZER_HAS_STRUCT_FILE` off under `SANITIZER_MUSL` inside `msan_interceptors.cpp` (not the shared header), so `unpoison_file` is a no-op on musl without rebuilding any other runtime. |
+| `compiler-rt/0029` | Intercepts `qsort_r` on musl, which has it with glibc's argument order since 1.2.3: `SANITIZER_INTERCEPT_QSORT_R` becomes `(SI_GLIBC \|\| SANITIZER_MUSL)`. `qsort` then goes through the `qsort_r` interceptor, as on glibc. This changes the shared header, so every runtime's archive changes. |
 
 ## Known limitation: the sealed runtime spins when it cannot get memory
 
@@ -431,7 +438,9 @@ targets on each push to `main`, on each pull request and once a week. The last s
 `toolchain/Dockerfile` are the tests. A static musl binary runs, a static ASan binary
 reports an overflow that only a live interceptor can report, a link without the wrap
 list fails, and a sealed ASan C++ program reports a `std::string` container-overflow
-while a correct one does not. On x86_64 and aarch64 an MSan step follows: it runs a clean program
+while a correct one does not. A static ASan program's `qsort_r` and `qsort` calls over a
+poisoned element report from the interceptor, and a correct sort with each does not report.
+On x86_64 and aarch64 an MSan step follows: it runs a clean program
 and an uninitialized-read program, each linked plain and sealed, twelve times each,
 requires at least one pass of each and accepts no outcome other than a pass or a
 known miss (the sealed spin above, or the re-exec that the build's seccomp profile
