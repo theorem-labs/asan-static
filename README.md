@@ -59,8 +59,11 @@ The snapshot differs from archive-asan-static in five ways:
   also builds the MSan configs and a smoke test for them (sections 5b and 6).
 - Compiler-rt patch `0029` intercepts `qsort_r` on musl. With it, `qsort` goes through the
   interceptor that glibc builds use, which calls the `qsort_r` one. The patch changes
-  `sanitizer_platform_interceptors.h`, which every runtime includes, so
-  `libclang_rt.asan.a`, its wrap list, and the MSan archive and its wrap list change. A
+  `sanitizer_platform_interceptors.h`. Every runtime that includes
+  `sanitizer_common_interceptors.inc` and keeps the gate changes: `libclang_rt.asan.a` and
+  its wrap list, the MSan archive and its wrap list, and the TSan archive. HWASan sets the
+  gate to 0 in `hwasan_platform_interceptors.h`, and standalone UBSan does not include the
+  `.inc`, so their code does not change. A
   build that includes `0029` does not give the md5 below. Its binaries are a new toolchain
   version, not the toolchain of the binaries in the released proofs.
 
@@ -385,7 +388,7 @@ through the same interceptor as before.
 | `compiler-rt/0026` | Sealed: `__msan_init` records its frame like `__asan_init`. On x86_64/aarch64 this sets the top of the sealed main-thread stack window that `MsanThread::Init`'s `CHECK(AddrIsInStack())` reads; without it that check failed in 6 of 80 sealed runs (x86_64). |
 | `compiler-rt/0027` | Sealed: gives MSan a sealed start-up. At the top of `__msan_init`, before the runtime's first mapping, it reserves the shadow, origin, invalid and allocator ranges, and the allocator's region-info array above them, with `MAP_FIXED_NOREPLACE` and spins on refusal (like asan's `SealedReserveShadow`); it pins the common flags asan's `SealFlags` pins, `clear_shadow_mmap_threshold` included, so no signal handler is installed, a detection dies by `SIGABRT` and the shadow is never re-mapped; it creates the symbolizer only when a report needs it, so start-up does not look for `llvm-symbolizer`; and it makes `ReExec` unreachable. |
 | `compiler-rt/0028` | MSan-only: turns `SANITIZER_HAS_STRUCT_FILE` off under `SANITIZER_MUSL` inside `msan_interceptors.cpp` (not the shared header), so `unpoison_file` is a no-op on musl without rebuilding any other runtime. |
-| `compiler-rt/0029` | Intercepts `qsort_r` on musl, which has it with glibc's argument order since 1.2.3: `SANITIZER_INTERCEPT_QSORT_R` becomes `(SI_GLIBC \|\| SANITIZER_MUSL)`. `qsort` then goes through the `qsort_r` interceptor, as on glibc. This changes the shared header, so every runtime's archive changes. |
+| `compiler-rt/0029` | Intercepts `qsort_r` on musl, which has it with glibc's argument order since 1.2.3: `SANITIZER_INTERCEPT_QSORT_R` becomes `(SI_GLIBC \|\| SANITIZER_MUSL)`. `qsort` then goes through the `qsort_r` interceptor, as on glibc. This changes the shared header, so the runtimes that include `sanitizer_common_interceptors.inc` and keep the gate change: ASan, MSan and TSan. HWASan turns the gate off, and standalone UBSan does not include the `.inc`. |
 
 ## Known limitation: the sealed runtime spins when it cannot get memory
 

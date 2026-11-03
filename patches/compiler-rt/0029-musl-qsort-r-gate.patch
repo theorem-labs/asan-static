@@ -31,9 +31,11 @@ qsort is __qsort_r with a comparator adapter (src/stdlib/qsort_nr.c), so
 REAL(qsort_r) sorts as REAL(qsort) did, and a qsort call is checked in the
 same way as before: one comparator pass, then one WRITE_RANGE of the array.
 
-sanitizer_platform_interceptors.h is a shared header.  Every runtime that
-includes sanitizer_common_interceptors.inc changes, the ASan archive and its
-wrap list among them, and the MSan archive and its wrap list too.  A toolchain
+sanitizer_platform_interceptors.h is a shared header.  The runtimes that
+include sanitizer_common_interceptors.inc and keep this gate change: ASan (the
+archive and its wrap list), MSan (the archive and its wrap list) and TSan.
+HWASan sets the gate to 0 itself, and standalone UBSan does not include the
+.inc.  A toolchain
 that has this patch is a new toolchain version.  Its libclang_rt.asan.a is not
 the archive that the earlier binaries linked.
 
