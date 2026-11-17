@@ -40,8 +40,6 @@ that has this patch is a new toolchain version.  Its libclang_rt.asan.a is not
 the archive that the earlier binaries linked.
 
 Reported in theorem-labs/asan-static#1.
-
-Omp-Session: 01a175dd-5d8a-75ac-99a0-68919637ef66
 ---
  .../lib/sanitizer_common/sanitizer_platform_interceptors.h     | 3 ++-
  1 file changed, 2 insertions(+), 1 deletion(-)

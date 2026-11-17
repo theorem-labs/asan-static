@@ -31,12 +31,12 @@ This is archive-asan-static commit `385966a2672b4be07efec847baee1dd5e497b25f`, t
 for the binaries in Theorem Labs' OSS-Fuzz proofs: archive-asan-static
 `a408805db578be529ff2923ddee5a608ba9753d2` plus musl patch 0003, which keeps a static
 program's TLS block in `.bss` and replaces musl patch 0002. It is a fresh snapshot of that
-commit's `toolchain/` and `patches/`, without archive-asan-static's history, plus six
+commit's `toolchain/` and `patches/`, without archive-asan-static's history, plus nine
 compiler-rt patches that are not part of archive-asan-static `385966a2`: five (`0024`–`0028`)
-add MemorySanitizer support to the sealed static toolchain, and one (`0029`) intercepts
-`qsort_r` on musl. They are described below and in the patch table.
+add MemorySanitizer support to the sealed static toolchain, and four (`0029`–`0032`) add or
+correct interceptors for musl. They are described below and in the patch table.
 
-The snapshot differs from archive-asan-static in five ways:
+The snapshot differs from archive-asan-static in six ways:
 
 - The `From:` line of each patch names Theorem Labs, except the five MSan patches
   `0024`–`0028`.
@@ -66,9 +66,17 @@ The snapshot differs from archive-asan-static in five ways:
   `.inc`, so their code does not change. A
   build that includes `0029` does not give the md5 below. Its binaries are a new toolchain
   version, not the toolchain of the binaries in the released proofs.
+- Compiler-rt patches `0030`, `0031` and `0032` change more interceptors on musl. `0030`
+  turns on the interceptors of `timer_create`, `timer_delete`, `timer_gettime` and
+  `timer_settime`. It changes the same shared header as `0029`, so the same runtimes
+  change. `0031` turns on the ASan interceptors of `pthread_tryjoin_np` and
+  `pthread_timedjoin_np`, and the gates of the same two interceptors in standalone LSan.
+  `0032` gives seven time interceptors the libc's `time_t`. Its interceptors behave
+  differently only on 32-bit Arm, where `time_t` is wider than `unsigned long`. A build
+  that includes any of the three does not give the md5 below either.
 
 Both patch series apply with `patch -p1 --fuzz=0` to the pinned bases. Excluding the
-five MSan patches and patch 0029, which archive-asan-static does not carry, the source trees that result from
+five MSan patches and patches 0029 to 0032, which archive-asan-static does not carry, the source trees that result from
 the two series differ in six comment lines of two files, and in nothing else: five in
 `compiler-rt/lib/asan/asan_new_delete.cpp` (patch 0023) and one in
 `compiler-rt/lib/sanitizer_common/sanitizer_sealed.h` (patch 0019).
@@ -306,12 +314,12 @@ The image runs on the build machine and compiles for the target. The base image 
 pinned to `$BUILDPLATFORM`, and the three arguments above name the target. You do not
 need target hardware or an emulator to build the image.
 
-Six verification steps at the end of the Dockerfile run target binaries; one of them,
+Eight verification steps at the end of the Dockerfile run target binaries; one of them,
 the MemorySanitizer check, runs them only on x86_64 and aarch64, and on riscv64 and armv7,
 which have no MSan config, it skips and prints "no msan test". On a cross build, the
 build machine must be able to run them. On Linux, register `qemu-user` with
 `binfmt_misc` for the target, for example with the `qemu-user-static` package or with
-`docker run --privileged tonistiigi/binfmt --install <arch>`. Only these six steps
+`docker run --privileged tonistiigi/binfmt --install <arch>`. Only these eight steps
 need the emulator. The MSan check detects the emulator and does not run its binaries
 under it. With the default `VERIFY_RUNTIME=require` that fails the build; with
 `VERIFY_RUNTIME=defer` the check records them in
@@ -389,6 +397,9 @@ through the same interceptor as before.
 | `compiler-rt/0027` | Sealed: gives MSan a sealed start-up. At the top of `__msan_init`, before the runtime's first mapping, it reserves the shadow, origin, invalid and allocator ranges, and the allocator's region-info array above them, with `MAP_FIXED_NOREPLACE` and spins on refusal (like asan's `SealedReserveShadow`); it pins the common flags asan's `SealFlags` pins, `clear_shadow_mmap_threshold` included, so no signal handler is installed, a detection dies by `SIGABRT` and the shadow is never re-mapped; it creates the symbolizer only when a report needs it, so start-up does not look for `llvm-symbolizer`; and it makes `ReExec` unreachable. |
 | `compiler-rt/0028` | MSan-only: turns `SANITIZER_HAS_STRUCT_FILE` off under `SANITIZER_MUSL` inside `msan_interceptors.cpp` (not the shared header), so `unpoison_file` is a no-op on musl without rebuilding any other runtime. |
 | `compiler-rt/0029` | Intercepts `qsort_r` on musl, which has it with glibc's argument order since 1.2.3: `SANITIZER_INTERCEPT_QSORT_R` becomes `(SI_GLIBC \|\| SANITIZER_MUSL)`. `qsort` then goes through the `qsort_r` interceptor, as on glibc. This changes the shared header, so the runtimes that include `sanitizer_common_interceptors.inc` and keep the gate change: ASan, MSan and TSan. HWASan turns the gate off, and standalone UBSan does not include the `.inc`. |
+| `compiler-rt/0030` | Intercepts `timer_create`, `timer_delete`, `timer_gettime` and `timer_settime` on musl, whose `timer_t` is `void *` and whose prototypes are glibc's: `SANITIZER_INTERCEPT_TIMER_CREATE` becomes `(SI_GLIBC \|\| SANITIZER_MUSL)`. ASan then checks libc's writes of `*timerid`, `*curr_value` and `*old_value`. On 32-bit Arm the runtime attaches the `timer_gettime` and `timer_settime` interceptors as `__timer_gettime64` and `__timer_settime64`, the names that musl's headers give them. This changes the shared header, so ASan, MSan and TSan change, as with 0029. |
+| `compiler-rt/0031` | Intercepts `pthread_tryjoin_np` and `pthread_timedjoin_np` on musl: `ASAN_INTERCEPT_TRYJOIN` and `ASAN_INTERCEPT_TIMEDJOIN` become true for musl, and `SANITIZER_INTERCEPT_TRYJOIN` and `SANITIZER_INTERCEPT_TIMEDJOIN`, the gates of standalone LSan, cover musl. The interceptors record a successful join, so ASan reports a second join of the same thread as `Joining already joined thread` (`detect_invalid_join`, on by default). Without them ASan keeps the thread's record and does not report the second join. On 32-bit Arm ASan attaches the `pthread_timedjoin_np` interceptor as `__pthread_timedjoin_np_time64`. |
+| `compiler-rt/0032` | Gives the interceptors of `time`, `localtime`, `localtime_r`, `gmtime`, `gmtime_r`, `ctime` and `ctime_r` the type `__sanitizer_time_t` where they used `unsigned long` for a `time_t`. On 32-bit Arm, musl's `time_t` has 64 bits and `unsigned long` has 32. There `time` stored and returned only 32 of the 64 bits, and the other six checked 4 of the 8 bytes of `*timep`. On the 64-bit targets the two types have the same width. Patch 0011 made the same fix for `mktime`. |
 
 ## Known limitation: the sealed runtime spins when it cannot get memory
 
@@ -441,8 +452,18 @@ targets on each push to `main`, on each pull request and once a week. The last s
 `toolchain/Dockerfile` are the tests. A static musl binary runs, a static ASan binary
 reports an overflow that only a live interceptor can report, a link without the wrap
 list fails, and a sealed ASan C++ program reports a `std::string` container-overflow
-while a correct one does not. A static ASan program's `qsort_r` and `qsort` calls over a
-poisoned element report from the interceptor, and a correct sort with each does not report.
+while a correct one does not. A static ASan program's `qsort_r` and `qsort` calls report
+from the interceptor, over a poisoned element and over an array that ends past its heap
+block. A correct sort with each does not report, and the wrap list holds `qsort_r`. The
+next step tests patches 0030 to 0032. `timer_create`, `timer_gettime` and `timer_settime`
+report a bad pointer from their interceptors, and a correct timer does not report. A
+`pthread_join` after a successful `pthread_tryjoin_np` reports `Joining already joined
+thread`. `time` returns the value that it stores, and `localtime_r` checks all 8 bytes of
+a `time_t`. On 32-bit Arm, musl's headers give 28 intercepted functions a `__*64` symbol,
+for example `__timer_settime64` for `timer_settime`. On each target the step checks that a
+program refers to the symbol that the headers give, and that the wrap list holds it. Three
+calls through these symbols report from their interceptors. Each of these two test steps
+runs all of its checks, prints one line for each, and fails at the end if a check failed.
 On x86_64 and aarch64 an MSan step follows: it runs a clean program
 and an uninitialized-read program, each linked plain and sealed, twelve times each,
 requires at least one pass of each and accepts no outcome other than a pass or a
