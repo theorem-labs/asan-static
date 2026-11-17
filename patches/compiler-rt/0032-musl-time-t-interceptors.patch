@@ -37,10 +37,12 @@ otherwise.  So on the 64-bit targets, and on a glibc target whose time_t
 is a long, each type keeps its width, and the interceptors do the same
 as before.
 
-Patch 0011 made the same fix for mktime.  Its message says that mktime
-is the only interceptor in this file that returns a time_t as a long.
-That is not correct.  time also returns a time_t, as an unsigned long,
-and the six others take a pointer to a time_t as an unsigned long *.
+Patch 0011 made the same fix for mktime.  Its message says that mktime is
+the only interceptor in this file that returns a time_t as a long, and that
+the rest of the time-related ones return an int or write through a pointer.
+That is not correct for the seven interceptors that this patch fixes.  time
+also returns a time_t, as an unsigned long, and the six others read a
+time_t through an unsigned long *.
 
 Like patches 0030 and 0031, this patch changes libclang_rt.asan.a.  A
 toolchain that has it is a new toolchain version.

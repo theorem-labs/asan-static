@@ -204,9 +204,11 @@ the ISA attributes of all inputs. Thus one `rv64gc` object in the link sets the
 compressed-instruction flag on the output. The Dockerfile explains this in more
 detail.
 
-`VERIFY_RUNTIME=defer` skips the last check of the build, which runs a static ASan
-binary. That binary reserves about 14TiB of shadow memory on a 64-bit target. If the
-Docker daemon sets an `RLIMIT_AS` that is smaller, the binary cannot start. With
+With `VERIFY_RUNTIME=defer`, the build goes on when the interceptor check cannot start
+its static ASan binary. The later steps that run ASan programs (the `std::string` step,
+the `qsort` step, and the timer, join and time step) then build their programs and do
+not run them. An ASan binary reserves about 14TiB of shadow memory on a 64-bit target.
+If the Docker daemon sets an `RLIMIT_AS` that is smaller, the binary cannot start. With
 `defer`, the image contains `/opt/asan-static/RUNTIME-UNVERIFIED`, which records that
 the check did not run. The MemorySanitizer check on x86_64 and aarch64 follows the
 same rule: when no run of one of its binaries passes under a set `RLIMIT_AS`, and the
@@ -463,7 +465,7 @@ a `time_t`. On 32-bit Arm, musl's headers give 28 intercepted functions a `__*64
 for example `__timer_settime64` for `timer_settime`. On each target the step checks that a
 program refers to the symbol that the headers give, and that the wrap list holds it. Three
 calls through these symbols report from their interceptors. Each of these two test steps
-runs all of its checks, prints one line for each, and fails at the end if a check failed.
+runs all of its checks, prints what each check found, and fails at the end if a check failed.
 On x86_64 and aarch64 an MSan step follows: it runs a clean program
 and an uninitialized-read program, each linked plain and sealed, twelve times each,
 requires at least one pass of each and accepts no outcome other than a pass or a

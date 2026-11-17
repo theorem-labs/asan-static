@@ -29,23 +29,23 @@
 # is how the emulated build this replaced is still reachable -- see
 # "Cross-building" in README.md, where the two are compared.
 #
-# Nothing else in here is written per architecture.  What each architecture needs
-# that is not the compiler -- kernel uapi headers, libstdc++ headers, a GNU ld, the
-# musl loader, GCC's builtins -- is fetched from Alpine's repository for APK_ARCH in
-# section 0a, at the same pinned versions the target's own image installs, so a
-# cross-built image reads the same files a native one does.  armv7 is the one
-# architecture that changed anything else, in one place: the CAN_TARGET_* settings
-# in section 3, which name architectures rather than being chosen per architecture,
-# and are explained there.  The one other thing that is not portable is not in this
-# file: ASan on riscv64 takes the dynamic-shadow path and its allocator reserves
-# 128GB, so the four verification steps below that run an ASan binary (the
-# interceptor check, the std::string check, the qsort check and the timer,
-# join and time check) need a container whose RLIMIT_AS is not small.  The
-# others do not: the plain static musl link runs, the link
-# that must fail still fails, and the MSan step runs but skips, printing "no msan
-# test", because riscv64 has no msan runtime and so no MSan config.  A 32-bit
-# target needs none of that -- its shadow is about 512MiB.  See the "Running an
-# emulated image" section of README.md.
+# Nothing else in here is written per architecture.  What each architecture
+# needs that is not the compiler -- kernel uapi headers, libstdc++ headers, a
+# GNU ld, the musl loader, GCC's builtins -- is fetched from Alpine's repository
+# for APK_ARCH in section 0a, at the same pinned versions the target's own image
+# installs, so a cross-built image reads the same files a native one does.
+# armv7 is the one architecture that changed anything else, in one place: the
+# CAN_TARGET_* settings in section 3, which name architectures rather than being
+# chosen per architecture, and are explained there.  The one other thing that is
+# not portable is not in this file: ASan on riscv64 takes the dynamic-shadow
+# path and its allocator reserves 128GB, so the four verification steps below
+# that run an ASan binary (the interceptor check, the std::string check, the
+# qsort check and the timer, join and time check) need a container whose
+# RLIMIT_AS is not small.  The others do not: the plain static musl link runs,
+# the link that must fail still fails, and the MSan step runs but skips,
+# printing "no msan test", because riscv64 has no msan runtime and so no MSan
+# config.  A 32-bit target needs none of that -- its shadow is about 512MiB.
+# See the "Running an emulated image" section of README.md.
 #
 # Eight of the steps at the end run binaries for the target; one of them, the
 # MemorySanitizer test, only on x86_64 and aarch64, the targets with an msan
@@ -1439,6 +1439,10 @@ RUN set -eu; \
         "It was built with --build-arg VERIFY_RUNTIME=defer, which asks for that" \
         "deliberately and for this file to be here saying so." \
         "" \
+        "Because this file exists, the later build steps that run ASan programs" \
+        "(the std::string step, the qsort step, and the timer, join and time step)" \
+        "built their programs and did not run them." \
+        "" \
         "Nothing has shown that this toolchain attaches its interceptors.  Before" \
         "trusting it, run /tmp/attach, the program of the build-time check, from a" \
         "docker run of this image under an RLIMIT_AS that is not small, and require" \
@@ -1544,10 +1548,11 @@ RUN set -eu; \
 # qsort interceptor makes the same comparator pass and range check.
 #
 # Each check prints one line: what it found, or what it did not find followed
-# by the program's output and exit status.  The step runs all six checks and
-# then fails if any of them failed, so a build without 0029 shows which checks
-# need it.  Each program runs under timeout -s KILL 60.  The programs run only
-# when the interceptor check above could run its binary.
+# by the program's output and exit status (for check 6, the path of the wrap
+# list).  The step runs all six checks and then fails if any of them failed,
+# so a build without 0029 shows which checks need it.  Each program runs
+# under timeout -s KILL 60.  The programs run only when the interceptor check
+# above could run its binary.
 RUN set -eu; \
     printf '%s\n' \
       '#define _GNU_SOURCE' \
@@ -1696,12 +1701,13 @@ RUN set -eu; \
 
 # ...and that a static ASan program's timer_* calls, its thread joins and its
 # time functions go through interceptors that check what they should (patches
-# 0030, 0031 and 0032).  Three programs, timers.c, joins.c and time-t.c, take
-# the check to run as their argument.  A fourth source, reach.c, is only
-# compiled.  Every timer_create passes a null sigevent and no timer stays
-# armed, so no signal comes.  libc writes *timerid, *curr_value, *old_value,
-# the struct timespec and the struct tm in code that ASan does not
-# instrument, so only an interceptor's check can report a bad pointer here.
+# 0030, 0031 and 0032).  Two programs, timers.c and time-t.c, take the check
+# to run as their argument.  A third, joins.c, runs only the double-join
+# check.  A fourth source, reach.c, is only compiled.  Every timer_create
+# passes a null sigevent and no timer stays armed, so no signal comes.  libc
+# writes *timerid, *curr_value, *old_value, the struct timespec and the
+# struct tm in code that ASan does not instrument, so only an interceptor's
+# check can report a bad pointer here.
 #
 # The timer checks (patch 0030):
 #   1. timer_create writes its timer_t into a poisoned part of a valid heap
@@ -1752,9 +1758,11 @@ RUN set -eu; \
 # to __*64 symbols, and the runtime attaches the interceptors of these
 # functions under the same __*64 names.  So on armv7 the interceptor of
 # timer_gettime is __timer_gettime64, and its frame and its wrap list line
-# carry that name.  Every check of this step that names an interceptor takes
-# the name from llvm-nm -u of an object that refers to the function by its
-# plain name (sym below), so one step is right on every target.
+# carry that name.  Every check of this step that names an interceptor's
+# frame takes the name from llvm-nm -u of an object that refers to the
+# function by its plain name (sym below), so one step is right on every
+# target.  Check 9 instead takes its names from a list (reach below), and
+# compares them with what llvm-nm -u prints for reach.o.
 #   9. reach.c takes the address of each of the 28 of these functions that the
 #      runtime intercepts on musl, by plain name.  It is compiled with
 #      musl.cfg, which uses the same headers and adds no __asan_* reference,
@@ -1774,8 +1782,11 @@ RUN set -eu; \
 # 10 fails for timer_settime.  Without 0031, check 9 fails for
 # pthread_timedjoin_np, whose ASan interceptor 0031 turns on.
 #
-# Each check prints one line: what it found, or what it did not find followed
-# by the program's output and exit status.  The step runs every check and then
+# Each of checks 1 to 8 prints what it found, or what it did not find
+# followed by the program's output and exit status.  Check 10 does this for
+# each of its three calls.  Check 9 prints one line when it passes.  When it
+# fails, it prints a line for each function that fails, and a line if reach.o
+# does not refer to exactly 28 symbols.  The step runs every check and then
 # fails if any of them failed, so a build without one of the patches shows
 # which checks need it.  It prints one summary line for each group of checks
 # that all passed.  Each program runs under timeout -s KILL 60.  The programs
@@ -1975,55 +1986,55 @@ RUN set -eu; \
         echo "$pass"; \
       }; \
       inc='sanitizer_common_interceptors\.inc'; \
-      ok1=0 ok2=0 ok3=0 ok4=0 ok5=0 ok6=0 ok7=0 ok8=0 ok9=1 ok10=1; \
+      ok1=1 ok2=1 ok3=1 ok4=1 ok5=1 ok6=1 ok7=1 ok8=1 ok9=1 ok10=1; \
       run /tmp/timers-poisoned-timerid.log /tmp/timers poisoned-timerid; \
-      if check /tmp/timers-poisoned-timerid.log \
-           "timer_create into a poisoned timerid reports use-after-poison from the timer_create interceptor" \
-           "timer_create into a poisoned timerid did not report from the timer_create interceptor:" \
-           "ERROR: AddressSanitizer: use-after-poison" "#0 .*[ _]$s_create .*$inc" "#[0-9]+ .* in main .*timers\.c"; \
-      then ok1=1; fi; \
+      check /tmp/timers-poisoned-timerid.log \
+        "timer_create into a poisoned timerid reports use-after-poison from the timer_create interceptor" \
+        "timer_create into a poisoned timerid did not report from the timer_create interceptor:" \
+        "ERROR: AddressSanitizer: use-after-poison" "#0 .*[ _]$s_create .*$inc" "#[0-9]+ .* in main .*timers\.c" \
+        || ok1=0; \
       run /tmp/timers-short-timerid.log /tmp/timers short-timerid; \
-      if check /tmp/timers-short-timerid.log \
-           "timer_create into a timerid one byte short reports heap-buffer-overflow from the $s_create interceptor" \
-           "timer_create into a timerid one byte short did not report heap-buffer-overflow from the $s_create interceptor:" \
-           "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_create .*$inc"; \
-      then ok2=1; fi; \
+      check /tmp/timers-short-timerid.log \
+        "timer_create into a timerid one byte short reports heap-buffer-overflow from the $s_create interceptor" \
+        "timer_create into a timerid one byte short did not report heap-buffer-overflow from the $s_create interceptor:" \
+        "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_create .*$inc" \
+        || ok2=0; \
       run /tmp/timers-short-curr-value.log /tmp/timers short-curr-value; \
-      if check /tmp/timers-short-curr-value.log \
-           "timer_gettime into a curr_value one byte short reports heap-buffer-overflow from the $s_gettime interceptor" \
-           "timer_gettime into a curr_value one byte short did not report heap-buffer-overflow from the $s_gettime interceptor:" \
-           "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_gettime .*$inc"; \
-      then ok3=1; fi; \
+      check /tmp/timers-short-curr-value.log \
+        "timer_gettime into a curr_value one byte short reports heap-buffer-overflow from the $s_gettime interceptor" \
+        "timer_gettime into a curr_value one byte short did not report heap-buffer-overflow from the $s_gettime interceptor:" \
+        "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_gettime .*$inc" \
+        || ok3=0; \
       run /tmp/timers-short-old-value.log /tmp/timers short-old-value; \
-      if check /tmp/timers-short-old-value.log \
-           "timer_settime into an old_value one byte short reports heap-buffer-overflow from the $s_settime interceptor" \
-           "timer_settime into an old_value one byte short did not report heap-buffer-overflow from the $s_settime interceptor:" \
-           "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_settime .*$inc"; \
-      then ok4=1; fi; \
+      check /tmp/timers-short-old-value.log \
+        "timer_settime into an old_value one byte short reports heap-buffer-overflow from the $s_settime interceptor" \
+        "timer_settime into an old_value one byte short did not report heap-buffer-overflow from the $s_settime interceptor:" \
+        "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_settime .*$inc" \
+        || ok4=0; \
       run /tmp/timers-correct.log /tmp/timers correct; \
-      if check /tmp/timers-correct.log \
-           "a correct timer_create, timer_settime, timer_gettime and timer_delete do not report" \
-           "a correct timer_create, timer_settime, timer_gettime and timer_delete did not print timer ok and exit 0:" \
-           "^timer ok$" "^exit status 0$"; \
-      then ok5=1; fi; \
+      check /tmp/timers-correct.log \
+        "a correct timer_create, timer_settime, timer_gettime and timer_delete do not report" \
+        "a correct timer_create, timer_settime, timer_gettime and timer_delete did not print timer ok and exit 0:" \
+        "^timer ok$" "^exit status 0$" \
+        || ok5=0; \
       run /tmp/joins.log /tmp/joins; \
-      if check /tmp/joins.log \
-           "a pthread_join after a successful pthread_tryjoin_np reports the second join and exits 1" \
-           "a pthread_join after a successful pthread_tryjoin_np did not report:" \
-           "ERROR: AddressSanitizer: Joining already joined thread" "^exit status 1$"; \
-      then ok6=1; fi; \
+      check /tmp/joins.log \
+        "a pthread_join after a successful pthread_tryjoin_np reports the second join and exits 1" \
+        "a pthread_join after a successful pthread_tryjoin_np did not report:" \
+        "ERROR: AddressSanitizer: Joining already joined thread" "^exit status 1$" \
+        || ok6=0; \
       run /tmp/time-t-time.log /tmp/time-t time; \
-      if check /tmp/time-t-time.log \
-           "time returns the value that it stores, and the value is a current time" \
-           "time did not return the value it stored:" \
-           "^time returned 0x[0-9a-f]{16} and stored 0x[0-9a-f]{16}$" "^exit status 0$"; \
-      then ok7=1; fi; \
+      check /tmp/time-t-time.log \
+        "time returns the value that it stores, and the value is a current time" \
+        "time did not return the value it stored, or that value is not a current time:" \
+        "^time returned 0x[0-9a-f]{16} and stored 0x[0-9a-f]{16}$" "^exit status 0$" \
+        || ok7=0; \
       run /tmp/time-t-poisoned-time-t.log /tmp/time-t poisoned-time-t; \
-      if check /tmp/time-t-poisoned-time-t.log \
-           "localtime_r checks all 8 bytes of time_t: a READ of size 8 reports from the $s_localtime_r interceptor" \
-           "localtime_r did not check all 8 bytes of time_t:" \
-           "ERROR: AddressSanitizer: " "READ of size 8 " "#0 .*[ _]$s_localtime_r .*$inc"; \
-      then ok8=1; fi; \
+      check /tmp/time-t-poisoned-time-t.log \
+        "localtime_r checks all 8 bytes of time_t: a READ of size 8 reports from the $s_localtime_r interceptor" \
+        "localtime_r did not check all 8 bytes of time_t:" \
+        "ERROR: AddressSanitizer: " "READ of size 8 " "#0 .*[ _]$s_localtime_r .*$inc" \
+        || ok8=0; \
       set -- $(llvm-nm -u /tmp/reach.o | awk '{print $NF}'); \
       refs=" $* "; \
       if [ $# -ne 28 ]; then echo "reach: the object refers to $# symbols, not 28: $*" >&2; ok9=0; fi; \
