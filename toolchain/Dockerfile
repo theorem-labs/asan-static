@@ -38,20 +38,21 @@
 # in section 3, which name architectures rather than being chosen per architecture,
 # and are explained there.  The one other thing that is not portable is not in this
 # file: ASan on riscv64 takes the dynamic-shadow path and its allocator reserves
-# 128GB, so the two verification steps below that run an ASan binary (the
-# interceptor check and the std::string check) need a container whose RLIMIT_AS
-# is not small.  The others do not: the plain static musl link runs, the link
+# 128GB, so the four verification steps below that run an ASan binary (the
+# interceptor check, the std::string check, the qsort check and the timer,
+# join and time check) need a container whose RLIMIT_AS is not small.  The
+# others do not: the plain static musl link runs, the link
 # that must fail still fails, and the MSan step runs but skips, printing "no msan
 # test", because riscv64 has no msan runtime and so no MSan config.  A 32-bit
 # target needs none of that -- its shadow is about 512MiB.  See the "Running an
 # emulated image" section of README.md.
 #
-# Six of the steps at the end run binaries for the target; one of them, the
+# Eight of the steps at the end run binaries for the target; one of them, the
 # MemorySanitizer test, only on x86_64 and aarch64, the targets with an msan
 # runtime.  On a native build that is nothing to arrange; on a cross build the
 # machine has to be able to execute them, which on Linux means binfmt_misc with
 # qemu-user registered -- `docker run --privileged tonistiigi/binfmt --install
-# <arch>` once per boot, or docker/setup-qemu-action in CI.  Only these six
+# <arch>` once per boot, or docker/setup-qemu-action in CI.  Only these eight
 # steps need it.  Nothing the image is for does.  MSan cannot run under
 # qemu-user at all (qemu places the guest stack inside MSan's fixed ranges), so
 # the MSan step detects emulation and does not run its binaries; it treats that
@@ -760,8 +761,8 @@ RUN set -eu; \
 # members of libc.a that nothing in it called.  The driver adds the option only
 # when the file exists, so the file goes rather than the option being
 # countermanded from the config, and the first resource dir, whose dynamic
-# link is the case the list exists for, keeps its copies.  What this leaves in a
-# binary is checked by conformance/checks/dead-interceptors.py.
+# link is the case the list exists for, keeps its copies.  The "Binary size"
+# section of README.md gives the sizes that result.
 RUN set -eu; \
     rtdir=$(clang --target="$TRIPLE" -resource-dir="$STATIC_RESOURCE_DIR" -print-runtime-dir); \
     [ -f "$rtdir/libclang_rt.asan.a.syms" ] || { echo "no libclang_rt.asan.a.syms under $rtdir to remove"; exit 1; }; \
@@ -1312,17 +1313,26 @@ RUN set -eu; \
 # ---------------------------------------------------------------------------
 # 6. Build-time verification
 #
-# What the wrap list contains is not checked here.  It used to be counted, with
-# anything under 300 of the 380 entries treated as a generator that went wrong,
-# and a count with eighty entries of slack is not a property worth having: the
-# same file with seventy interceptors deleted passes it, and so does everything
-# else in this image, because a name that is not in the file is simply not
-# attached and nothing anywhere says so.  conformance/checks/wrap-list.py
-# recomputes the whole file instead -- the __wrap_ symbols of the installed
-# archive, intersected with what the sysroot's libc.a and libunwind.a define --
-# and requires the installed one to be exactly that, which is the count and every
-# name in it, and holds after the build as well as during it.  CI runs it against
-# this image on both architectures.
+# The steps below build programs with the configs above and check what they
+# do.  In this order, they check that a plain static musl program runs, that
+# an overflow that only a live interceptor can report is reported, and that a
+# link without the wrap list fails.  Next, std::string reports
+# container-overflow in the ASan builds, and the interceptors of qsort, the
+# timer_* functions, the thread joins and the time functions report (patches
+# 0029 to 0032).  Last, MSan reports an uninitialized read, the hardened libc++
+# traps on a broken precondition, and the vptr handler traps on a bad
+# downcast.  The comment above each step says what it checks.
+#
+# The wrap list is not compared with a list made again from the archives.  It
+# used to be counted, with anything under 300 of the 380 entries treated as a
+# generator that went wrong.  A count with eighty entries of slack is not a
+# property worth having: the same file with seventy interceptors deleted passes
+# it, because a name that is not in the file is not attached and nothing says
+# so.  The test steps check names instead.  A report from an interceptor shows
+# that the list attaches it.  The qsort step also requires the line for
+# qsort_r.  The timer, join and time step requires the line for each of 28
+# functions that musl's headers rename on 32-bit Arm, under the name that the
+# headers give on the target.
 # ---------------------------------------------------------------------------
 RUN printf '#include <stdio.h>\nint main(void){printf("hello musl\\n");return 0;}\n' > /tmp/hello.c \
  && clang --config=/opt/asan-static/musl.cfg /tmp/hello.c -o /tmp/hello \
@@ -1378,11 +1388,11 @@ RUN printf '#include <stdio.h>\nint main(void){printf("hello musl\\n");return 0;
 # failure whatever the limit is.  What the constrained host does instead is
 # VERIFY_RUNTIME: "require", the default, is a build failure that says what the
 # cause and the fix are rather than an opaque one; "defer" is for a host that
-# needs the image anyway, and leaves this property to tests/run.sh, which asserts
-# it in more detail than this does -- memcpy_overflow is this program, and its
-# expectation is the resolved name of frame #0 -- from a docker run, where the
-# limit can be lifted.  A deferral is recorded in the image, because a build log
-# is not where anyone looks to find out what an image was not checked for.
+# needs the image anyway, and leaves this property to a later check: run
+# /tmp/attach, this same program, from a docker run of the image, where the
+# limit can be lifted, and require its report.  A deferral is recorded in the
+# image, because a build log is not where anyone looks to find out what an
+# image was not checked for.
 ARG VERIFY_RUNTIME=require
 RUN set -eu; \
     case "$VERIFY_RUNTIME" in \
@@ -1416,9 +1426,8 @@ RUN set -eu; \
         "" >&2; \
       if [ "$VERIFY_RUNTIME" != defer ]; then \
         printf '%s\n' \
-          "  To build the image anyway and leave this property to tests/run.sh," \
-          "  which checks it more closely than this does and runs where the limit" \
-          "  can be lifted:  --build-arg VERIFY_RUNTIME=defer" \
+          "  To build the image anyway and run this check later, from a docker run" \
+          "  of the image where the limit can be lifted:  --build-arg VERIFY_RUNTIME=defer" \
           "" >&2; \
         exit 1; \
       fi; \
@@ -1430,9 +1439,10 @@ RUN set -eu; \
         "It was built with --build-arg VERIFY_RUNTIME=defer, which asks for that" \
         "deliberately and for this file to be here saying so." \
         "" \
-        "Nothing has shown that this toolchain attaches its interceptors.  Run" \
-        "tests/run.sh against this image before trusting it: memcpy_overflow is the" \
-        "case the build-time check would have been, and asserts more than it did." \
+        "Nothing has shown that this toolchain attaches its interceptors.  Before" \
+        "trusting it, run /tmp/attach, the program of the build-time check, from a" \
+        "docker run of this image under an RLIMIT_AS that is not small, and require" \
+        "its report: a WRITE of size 100 from the memcpy interceptor." \
         > /opt/asan-static/RUNTIME-UNVERIFIED; \
       echo "interceptors NOT verified: see /opt/asan-static/RUNTIME-UNVERIFIED"; \
     else \
@@ -1490,30 +1500,54 @@ RUN set -eu; \
 # interceptor (patch 0029).  musl defines qsort_r, so a qsort_r call must get
 # the check of the whole array that the interceptor makes under glibc.
 #
-# One source, built twice (-DQSORT_R for qsort_r, without it for qsort), sorts 9
-# ints of a 16-int heap block.  Before the sort it poisons ints 8 to 15 with
-# __asan_poison_memory_region, so the sort covers one poisoned element.  The
-# block is real memory, so only an ASan check can object to the sort.  Two
-# other checks must stay silent, so that the report can come only from the
-# interceptor's WRITE_RANGE check of the whole array:
-#   - libc's own memcpy calls are wrapped too, so a sort that moves the
-#     poisoned element reports from memcpy inside musl's sift().  The ints are
-#     already in order (a[i] = i), and musl's smoothsort moves nothing for
-#     input that is already sorted: sift() and trinkle() stop at their first
-#     comparison, and cycle() returns for fewer than two elements.
-#   - The comparator is no_sanitize("address"), so its reads of the poisoned
+# Three programs.  The first two are each built twice, with -DQSORT_R for
+# qsort_r and without it for qsort:
+#   - sort-over.c sorts 9 ints of a 16-int heap block.  Before the sort it
+#     poisons ints 8 to 15 with __asan_poison_memory_region, so the sort
+#     covers one poisoned element.  The block is real memory, so only an ASan
+#     check can object to the sort.  ASan reports it as use-after-poison.
+#   - sort-heap.c sorts 8 ints of a 7-int heap block.  A helper marked
+#     no_sanitize("address") writes the eighth int just past the end of the
+#     block.  The allocator rounds the block up to 32 bytes, so the write
+#     touches no allocator metadata.  This is a real out-of-bounds write, and
+#     ASan reports it as heap-buffer-overflow.
+#   - sort-ok.c sorts 1000 ints with qsort_r (descending, through the
+#     comparator's own argument, so the interceptor must pass that argument
+#     on) and with qsort.
+# In the first two, two other checks must stay silent, so that the report can
+# come only from the interceptor's WRITE_RANGE check of the whole array:
+#   - libc's own memcpy calls are wrapped too, so a sort that moves the bad
+#     element reports from memcpy inside musl's sift().  The ints are already
+#     in order (a[i] = i), and musl's smoothsort moves nothing for input that
+#     is already sorted: sift() and trinkle() stop at their first comparison,
+#     and cycle() returns for fewer than two elements.
+#   - The comparator is no_sanitize("address"), so its reads of the bad
 #     element do not report from the program's own code.
 #
-# The qsort_r build must report a WRITE of size 36 from the qsort_r interceptor
-# called by main.  Without 0029 it reports nothing, because the call goes
-# straight to musl.  The qsort build must report the same WRITE from a qsort
-# interceptor.  With 0029 that is the qsort_r one, reached from the qsort one,
-# and a tail call can drop the qsort frame, so either name passes.
+# The checks, in this order:
+#   1. The qsort_r build of sort-over.c must report a WRITE of size 36 (the 9
+#      ints) from the qsort_r interceptor, called by main.
+#   2. The qsort build of sort-over.c must report the same WRITE from a qsort
+#      interceptor.  With 0029 that is the qsort_r one, reached from the qsort
+#      one, and a tail call can drop the qsort frame, so either name passes.
+#   3. The qsort_r build of sort-heap.c must report heap-buffer-overflow and a
+#      WRITE of size 32 (the 8 ints) from the qsort_r interceptor, called by
+#      main.
+#   4. The qsort build of sort-heap.c must report the same from a qsort or
+#      qsort_r interceptor.
+#   5. sort-ok must print "sort ok" and exit 0.
+#   6. The wrap list, the file that section 5 finds with -print-runtime-dir,
+#      must hold the line --wrap=qsort_r.
+# Without 0029, checks 1, 3 and 6 fail: no qsort_r interceptor is built, so
+# the qsort_r call goes straight to musl and nothing reports, and the wrap
+# list has no qsort_r.  Checks 2, 4 and 5 still pass, because the stand-alone
+# qsort interceptor makes the same comparator pass and range check.
 #
-# A third program sorts 1000 ints with qsort_r (descending, through the
-# comparator's own argument, so the interceptor must pass that argument on)
-# and with qsort, and must print "sort ok" and exit 0.  The three programs run
-# only when the interceptor check above could run its binary.
+# Each check prints one line: what it found, or what it did not find followed
+# by the program's output and exit status.  The step runs all six checks and
+# then fails if any of them failed, so a build without 0029 shows which checks
+# need it.  Each program runs under timeout -s KILL 60.  The programs run only
+# when the interceptor check above could run its binary.
 RUN set -eu; \
     printf '%s\n' \
       '#define _GNU_SOURCE' \
@@ -1567,30 +1601,470 @@ RUN set -eu; \
       '  return 0;' \
       '}' \
       > /tmp/sort-ok.c; \
+    printf '%s\n' \
+      '#define _GNU_SOURCE' \
+      '#include <stdio.h>' \
+      '#include <stdlib.h>' \
+      '__attribute__((no_sanitize("address")))' \
+      'static void fill(int *a, int n) {' \
+      '  for (int i = 0; i < n; i++) a[i] = i;' \
+      '}' \
+      '__attribute__((no_sanitize("address")))' \
+      'static int cmp_r(const void *a, const void *b, void *arg) {' \
+      '  int x = *(const int *)a, y = *(const int *)b;' \
+      '  (void)arg;' \
+      '  return (x > y) - (x < y);' \
+      '}' \
+      '__attribute__((no_sanitize("address")))' \
+      'static int cmp(const void *a, const void *b) { return cmp_r(a, b, 0); }' \
+      'int main(void) {' \
+      '  int *a = malloc(7 * sizeof *a);' \
+      '  fill(a, 8);' \
+      '#ifdef QSORT_R' \
+      '  qsort_r(a, 8, sizeof *a, cmp_r, 0);' \
+      '#else' \
+      '  qsort(a, 8, sizeof *a, cmp);' \
+      '#endif' \
+      '  puts("not reported");' \
+      '  return 0;' \
+      '}' \
+      > /tmp/sort-heap.c; \
     clang --config=/opt/asan-static/asan-musl.cfg -g -DQSORT_R /tmp/sort-over.c -o /tmp/qsort_r-over; \
     clang --config=/opt/asan-static/asan-musl.cfg -g /tmp/sort-over.c -o /tmp/qsort-over; \
+    clang --config=/opt/asan-static/asan-musl.cfg -g -DQSORT_R /tmp/sort-heap.c -o /tmp/qsort_r-heap; \
+    clang --config=/opt/asan-static/asan-musl.cfg -g /tmp/sort-heap.c -o /tmp/qsort-heap; \
     clang --config=/opt/asan-static/asan-musl.cfg -g /tmp/sort-ok.c -o /tmp/sort-ok; \
+    wrap=$(clang --target="$TRIPLE" -resource-dir="$STATIC_RESOURCE_DIR" -print-runtime-dir)/libclang_rt.asan.a.wrap; \
     if [ -e /opt/asan-static/RUNTIME-UNVERIFIED ]; then \
       echo "qsort_r and qsort interception: built, not run (RUNTIME-UNVERIFIED)"; \
     else \
-      { ASAN_OPTIONS=detect_leaks=0 /tmp/qsort_r-over 2>&1 || true; } > /tmp/qsort_r-over.log; \
-      { ASAN_OPTIONS=detect_leaks=0 /tmp/qsort-over 2>&1 || true; } > /tmp/qsort-over.log; \
-      if ! grep -q "WRITE of size 36" /tmp/qsort_r-over.log \
-         || ! grep -qE "#0 .*qsort_r .*sanitizer_common_interceptors\.inc" /tmp/qsort_r-over.log \
-         || ! grep -qE "#[0-9]+ .* in main .*sort-over\.c" /tmp/qsort_r-over.log; then \
-        echo "qsort_r over a poisoned element did not report from the qsort_r interceptor:" >&2; \
-        cat /tmp/qsort_r-over.log >&2; \
-        exit 1; \
+      run() { \
+        log=$1; shift; st=0; \
+        ASAN_OPTIONS=detect_leaks=0 timeout -s KILL 60 "$@" > "$log" 2>&1 || st=$?; \
+        echo "exit status $st" >> "$log"; \
+      }; \
+      check() { \
+        log=$1 pass=$2 fail=$3; shift 3; \
+        for re in "$@"; do \
+          grep -qE -- "$re" "$log" || { echo "$fail" >&2; cat "$log" >&2; return 1; }; \
+        done; \
+        echo "$pass"; \
+      }; \
+      failed=0; \
+      run /tmp/qsort_r-over.log /tmp/qsort_r-over; \
+      check /tmp/qsort_r-over.log \
+        "qsort_r over a poisoned element reports from the qsort_r interceptor" \
+        "qsort_r over a poisoned element did not report from the qsort_r interceptor:" \
+        "WRITE of size 36" "#0 .*qsort_r .*sanitizer_common_interceptors\.inc" "#[0-9]+ .* in main .*sort-over\.c" \
+        || failed=$((failed + 1)); \
+      run /tmp/qsort-over.log /tmp/qsort-over; \
+      check /tmp/qsort-over.log \
+        "qsort over a poisoned element reports from an interceptor" \
+        "qsort over a poisoned element did not report from an interceptor:" \
+        "WRITE of size 36" "#0 .*qsort(_r)? .*sanitizer_common_interceptors\.inc" \
+        || failed=$((failed + 1)); \
+      run /tmp/qsort_r-heap.log /tmp/qsort_r-heap; \
+      check /tmp/qsort_r-heap.log \
+        "qsort_r past the end of a heap block reports heap-buffer-overflow from the qsort_r interceptor" \
+        "qsort_r past the end of a heap block did not report heap-buffer-overflow from the qsort_r interceptor:" \
+        "ERROR: AddressSanitizer: heap-buffer-overflow" "WRITE of size 32" \
+        "#0 .*qsort_r .*sanitizer_common_interceptors\.inc" "#[0-9]+ .* in main .*sort-heap\.c" \
+        || failed=$((failed + 1)); \
+      run /tmp/qsort-heap.log /tmp/qsort-heap; \
+      check /tmp/qsort-heap.log \
+        "qsort past the end of a heap block reports heap-buffer-overflow from an interceptor" \
+        "qsort past the end of a heap block did not report heap-buffer-overflow from an interceptor:" \
+        "ERROR: AddressSanitizer: heap-buffer-overflow" "WRITE of size 32" \
+        "#0 .*qsort(_r)? .*sanitizer_common_interceptors\.inc" \
+        || failed=$((failed + 1)); \
+      run /tmp/sort-ok.log /tmp/sort-ok; \
+      check /tmp/sort-ok.log \
+        "a correct qsort_r and qsort sort 1000 ints and do not report" \
+        "a correct qsort_r and qsort did not print sort ok and exit 0:" \
+        "^sort ok$" "^exit status 0$" \
+        || failed=$((failed + 1)); \
+      if grep -qx -- "--wrap=qsort_r" "$wrap"; then \
+        echo "the wrap list holds the line --wrap=qsort_r"; \
+      else \
+        echo "the wrap list did not hold the line --wrap=qsort_r:" >&2; \
+        echo "$wrap" >&2; \
+        failed=$((failed + 1)); \
       fi; \
-      if ! grep -q "WRITE of size 36" /tmp/qsort-over.log \
-         || ! grep -qE "#0 .*qsort(_r)? .*sanitizer_common_interceptors\.inc" /tmp/qsort-over.log; then \
-        echo "qsort over a poisoned element did not report from an interceptor:" >&2; \
-        cat /tmp/qsort-over.log >&2; \
-        exit 1; \
-      fi; \
-      out=$(ASAN_OPTIONS=detect_leaks=0 /tmp/sort-ok 2>&1) || { echo "a correct qsort_r and qsort failed:" >&2; echo "$out" >&2; exit 1; }; \
-      [ "$out" = "sort ok" ] || { echo "a correct qsort_r and qsort printed:" >&2; echo "$out" >&2; exit 1; }; \
+      [ "$failed" = 0 ] || exit 1; \
       echo "qsort_r and qsort are intercepted and report; a correct sort does not report"; \
+    fi
+
+# ...and that a static ASan program's timer_* calls, its thread joins and its
+# time functions go through interceptors that check what they should (patches
+# 0030, 0031 and 0032).  Three programs, timers.c, joins.c and time-t.c, take
+# the check to run as their argument.  A fourth source, reach.c, is only
+# compiled.  Every timer_create passes a null sigevent and no timer stays
+# armed, so no signal comes.  libc writes *timerid, *curr_value, *old_value,
+# the struct timespec and the struct tm in code that ASan does not
+# instrument, so only an interceptor's check can report a bad pointer here.
+#
+# The timer checks (patch 0030):
+#   1. timer_create writes its timer_t into a poisoned part of a valid heap
+#      block.  It must report use-after-poison from the timer_create
+#      interceptor, called by main.
+#   2. timer_create writes its timer_t into a heap block one byte shorter than
+#      a timer_t.  It must report heap-buffer-overflow from the timer_create
+#      interceptor.
+#   3. timer_gettime writes its curr_value into a heap block one byte shorter
+#      than a struct itimerspec.  It must report heap-buffer-overflow from the
+#      timer_gettime interceptor.
+#   4. timer_settime disarms a timer (its new_value is all zero) and writes its
+#      old_value into a heap block one byte short.  It must report
+#      heap-buffer-overflow from the timer_settime interceptor.
+#   5. A correct timer_create, timer_settime to one hour, timer_gettime,
+#      timer_settime to zero and timer_delete must not report and must exit 0.
+# Without 0030 the runtime has no timer_* interceptor, so checks 1 to 4 print
+# "not reported" and fail, and check 5 passes.  When a timer call fails, for
+# example with ENOSYS under qemu-user, the program prints the call and the
+# error and exits 1, so the check fails and says why.  timers.c also asserts
+# at compile time that musl's struct itimerspec has 32 bytes, as the
+# runtime's __sanitizer_itimerspec has on all four targets.
+#
+# The double-join check (patch 0031):
+#   6. joins.c starts a thread that returns at once, calls pthread_tryjoin_np
+#      until it joins the thread, and then calls pthread_join on the same
+#      thread.  ASan must report "Joining already joined thread" and exit 1.
+# The ASan interceptor of each join records a successful join, so the next
+# join of that thread reports.  Without 0031, pthread_tryjoin_np goes straight
+# to musl, ASan still holds the thread as joinable, and the second join is
+# undefined behaviour in musl.  It can crash, end in an ASan SEGV report or
+# wait until the program's alarm(30), and each of these ends fails the check.
+#
+# The time_t checks (patch 0032):
+#   7. time(&t), with t set to all ones first, must return the value that it
+#      stores in t, and that value must be a time between 1700000000 and
+#      4102444800.  The program runs under alarm(30).
+#   8. localtime_r reads the current time from an 8-byte heap block whose
+#      last 4 bytes are poisoned.  It must report a READ of size 8 from the
+#      localtime_r interceptor.
+# Without 0032 the time interceptors type time_t as unsigned long, which has
+# 32 bits on armv7.  There time stores 4 of the 8 bytes of t and returns 32
+# bits where the caller reads 64, and localtime_r checks only the first 4
+# bytes, so checks 7 and 8 fail on armv7.  On the 64-bit targets unsigned long
+# has 64 bits, and checks 7 and 8 pass with or without 0032.
+#
+# The reach checks.  On 32-bit Arm, musl's headers send calls of 63 functions
+# to __*64 symbols, and the runtime attaches the interceptors of these
+# functions under the same __*64 names.  So on armv7 the interceptor of
+# timer_gettime is __timer_gettime64, and its frame and its wrap list line
+# carry that name.  Every check of this step that names an interceptor takes
+# the name from llvm-nm -u of an object that refers to the function by its
+# plain name (sym below), so one step is right on every target.
+#   9. reach.c takes the address of each of the 28 of these functions that the
+#      runtime intercepts on musl, by plain name.  It is compiled with
+#      musl.cfg, which uses the same headers and adds no __asan_* reference,
+#      so its undefined symbols must be exactly 28.  On armv7 each must be the
+#      function's __*64 name in the list below, and the wrap list must hold
+#      that name and not the plain name.  On the 64-bit targets each must be
+#      the plain name, and the wrap list must hold it.  For each function that
+#      fails, the step prints "reach: <plain name>: <why>".
+#  10. Three calls through these names must each report heap-buffer-overflow
+#      from their own interceptor: timer_settime with an old_value one byte
+#      short (the run of check 4), clock_gettime into a struct timespec one
+#      byte short, and localtime_r into a struct tm one byte short.  The
+#      localtime_r call reads the constant 1700000000, so that the check does
+#      not depend on time(), which check 7 tests.  localtime_r checks its
+#      struct tm in a helper, unpoison_tm, so its frame may be #1, not #0.
+# Without 0030, check 9 fails for timer_gettime and timer_settime, and check
+# 10 fails for timer_settime.  Without 0031, check 9 fails for
+# pthread_timedjoin_np, whose ASan interceptor 0031 turns on.
+#
+# Each check prints one line: what it found, or what it did not find followed
+# by the program's output and exit status.  The step runs every check and then
+# fails if any of them failed, so a build without one of the patches shows
+# which checks need it.  It prints one summary line for each group of checks
+# that all passed.  Each program runs under timeout -s KILL 60.  The programs
+# run only when the interceptor check above could run its binary.
+RUN set -eu; \
+    printf '%s\n' \
+      '#define _GNU_SOURCE' \
+      '#include <errno.h>' \
+      '#include <stdio.h>' \
+      '#include <stdlib.h>' \
+      '#include <string.h>' \
+      '#include <time.h>' \
+      'void __asan_poison_memory_region(void const volatile *, size_t);' \
+      '_Static_assert(sizeof(struct itimerspec) == 32, "struct itimerspec is not 32 bytes");' \
+      'static int fail(const char *call) {' \
+      '  printf("%s failed: %s\n", call, strerror(errno));' \
+      '  puts("not reported");' \
+      '  return 1;' \
+      '}' \
+      'static void *short_block(size_t size) { return malloc(size - 1); }' \
+      'int main(int argc, char **argv) {' \
+      '  const char *mode = argc > 1 ? argv[1] : "";' \
+      '  struct itimerspec zero, hour, cur;' \
+      '  timer_t t;' \
+      '  memset(&zero, 0, sizeof zero);' \
+      '  hour = zero;' \
+      '  hour.it_value.tv_sec = 3600;' \
+      '  if (!strcmp(mode, "poisoned-timerid")) {' \
+      '    char *b = calloc(1, 64);' \
+      '    __asan_poison_memory_region(b + 32, 32);' \
+      '    if (timer_create(CLOCK_MONOTONIC, NULL, (timer_t *)(b + 32))) return fail("timer_create");' \
+      '  } else if (!strcmp(mode, "short-timerid")) {' \
+      '    if (timer_create(CLOCK_MONOTONIC, NULL, short_block(sizeof(timer_t)))) return fail("timer_create");' \
+      '  } else {' \
+      '    if (timer_create(CLOCK_MONOTONIC, NULL, &t)) return fail("timer_create");' \
+      '    if (!strcmp(mode, "short-curr-value")) {' \
+      '      if (timer_gettime(t, short_block(sizeof(struct itimerspec)))) return fail("timer_gettime");' \
+      '    } else if (!strcmp(mode, "short-old-value")) {' \
+      '      if (timer_settime(t, 0, &zero, short_block(sizeof(struct itimerspec)))) return fail("timer_settime");' \
+      '    } else if (!strcmp(mode, "correct")) {' \
+      '      if (timer_settime(t, 0, &hour, NULL)) return fail("timer_settime");' \
+      '      if (timer_gettime(t, &cur)) return fail("timer_gettime");' \
+      '      if (cur.it_value.tv_sec < 3500 || cur.it_value.tv_sec > 3600) {' \
+      '        printf("timer_gettime gave %lld seconds left of 3600\n", (long long)cur.it_value.tv_sec);' \
+      '        return 1;' \
+      '      }' \
+      '      if (timer_settime(t, 0, &zero, NULL)) return fail("timer_settime");' \
+      '      if (timer_delete(t)) return fail("timer_delete");' \
+      '      puts("timer ok");' \
+      '      return 0;' \
+      '    } else {' \
+      '      printf("no mode %s\n", mode);' \
+      '      return 2;' \
+      '    }' \
+      '    timer_delete(t);' \
+      '  }' \
+      '  puts("not reported");' \
+      '  return 0;' \
+      '}' \
+      > /tmp/timers.c; \
+    printf '%s\n' \
+      '#define _GNU_SOURCE' \
+      '#include <errno.h>' \
+      '#include <pthread.h>' \
+      '#include <stdio.h>' \
+      '#include <string.h>' \
+      '#include <unistd.h>' \
+      'static void *quick(void *arg) { return arg; }' \
+      'int main(void) {' \
+      '  pthread_t th;' \
+      '  int rc, tries = 0;' \
+      '  alarm(30);' \
+      '  rc = pthread_create(&th, NULL, quick, NULL);' \
+      '  if (rc) { printf("pthread_create failed: %s\n", strerror(rc)); return 1; }' \
+      '  while ((rc = pthread_tryjoin_np(th, NULL)) == EBUSY && ++tries < 10000) usleep(1000);' \
+      '  if (rc) { printf("pthread_tryjoin_np failed after %d tries: %s\n", tries, strerror(rc)); return 1; }' \
+      '  printf("pthread_tryjoin_np joined the thread after %d tries\n", tries);' \
+      '  fflush(stdout);' \
+      '  rc = pthread_join(th, NULL);' \
+      '  printf("pthread_join returned %d\n", rc);' \
+      '  puts("not reported");' \
+      '  return 0;' \
+      '}' \
+      > /tmp/joins.c; \
+    printf '%s\n' \
+      '#define _GNU_SOURCE' \
+      '#include <errno.h>' \
+      '#include <stdio.h>' \
+      '#include <stdlib.h>' \
+      '#include <string.h>' \
+      '#include <time.h>' \
+      '#include <unistd.h>' \
+      'void __asan_poison_memory_region(void const volatile *, size_t);' \
+      '_Static_assert(sizeof(time_t) == 8, "time_t is not 64 bits");' \
+      'static int fail(const char *call) {' \
+      '  printf("%s failed: %s\n", call, strerror(errno));' \
+      '  puts("not reported");' \
+      '  return 1;' \
+      '}' \
+      'static void *short_block(size_t size) { return malloc(size - 1); }' \
+      'int main(int argc, char **argv) {' \
+      '  const char *mode = argc > 1 ? argv[1] : "";' \
+      '  if (!strcmp(mode, "time")) {' \
+      '    time_t t, r;' \
+      '    alarm(30);' \
+      '    memset(&t, 0xff, sizeof t);' \
+      '    r = time(&t);' \
+      '    printf("time returned 0x%016llx and stored 0x%016llx\n", (unsigned long long)r, (unsigned long long)t);' \
+      '    if (r != t) return 1;' \
+      '    if (t < 1700000000 || t > 4102444800LL) {' \
+      '      puts("the value is not a time between 1700000000 and 4102444800");' \
+      '      return 1;' \
+      '    }' \
+      '    return 0;' \
+      '  }' \
+      '  if (!strcmp(mode, "poisoned-time-t")) {' \
+      '    struct timespec now;' \
+      '    struct tm tm;' \
+      '    time_t *tp = malloc(8);' \
+      '    if (clock_gettime(CLOCK_REALTIME, &now)) return fail("clock_gettime");' \
+      '    *tp = now.tv_sec;' \
+      '    __asan_poison_memory_region((char *)tp + 4, 4);' \
+      '    if (!localtime_r(tp, &tm)) return fail("localtime_r");' \
+      '  } else if (!strcmp(mode, "short-timespec")) {' \
+      '    if (clock_gettime(CLOCK_REALTIME, short_block(sizeof(struct timespec)))) return fail("clock_gettime");' \
+      '  } else if (!strcmp(mode, "short-tm")) {' \
+      '    time_t now = 1700000000;' \
+      '    if (!localtime_r(&now, short_block(sizeof(struct tm)))) return fail("localtime_r");' \
+      '  } else {' \
+      '    printf("no mode %s\n", mode);' \
+      '    return 2;' \
+      '  }' \
+      '  puts("not reported");' \
+      '  return 0;' \
+      '}' \
+      > /tmp/time-t.c; \
+    reach="clock_getres:__clock_getres_time64 clock_gettime:__clock_gettime64 \
+      clock_settime:__clock_settime64 ctime:__ctime64 ctime_r:__ctime64_r ftime:__ftime64 \
+      getitimer:__getitimer_time64 gmtime:__gmtime64 gmtime_r:__gmtime64_r \
+      localtime:__localtime64 localtime_r:__localtime64_r lstat:__lstat_time64 \
+      mktime:__mktime64 ppoll:__ppoll_time64 pthread_timedjoin_np:__pthread_timedjoin_np_time64 \
+      recvmmsg:__recvmmsg_time64 sem_timedwait:__sem_timedwait_time64 \
+      setitimer:__setitimer_time64 sigtimedwait:__sigtimedwait_time64 stat:__stat_time64 \
+      time:__time64 timer_gettime:__timer_gettime64 timer_settime:__timer_settime64 \
+      timerfd_gettime:__timerfd_gettime64 timerfd_settime:__timerfd_settime64 \
+      timespec_get:__timespec_get_time64 wait3:__wait3_time64 wait4:__wait4_time64"; \
+    { \
+      printf '%s\n' \
+        '#define _GNU_SOURCE' \
+        '#include <poll.h>' \
+        '#include <pthread.h>' \
+        '#include <semaphore.h>' \
+        '#include <signal.h>' \
+        '#include <sys/socket.h>' \
+        '#include <sys/stat.h>' \
+        '#include <sys/time.h>' \
+        '#include <sys/timeb.h>' \
+        '#include <sys/timerfd.h>' \
+        '#include <sys/wait.h>' \
+        '#include <time.h>' \
+        'typedef void (*fn)(void);' \
+        'fn const reach[] = {'; \
+      for pair in $reach; do printf '  (fn)%s,\n' "${pair%%:*}"; done; \
+      echo '};'; \
+    } > /tmp/reach.c; \
+    clang --config=/opt/asan-static/asan-musl.cfg -g /tmp/timers.c -o /tmp/timers; \
+    clang --config=/opt/asan-static/asan-musl.cfg -g /tmp/joins.c -o /tmp/joins; \
+    clang --config=/opt/asan-static/asan-musl.cfg -g /tmp/time-t.c -o /tmp/time-t; \
+    clang --config=/opt/asan-static/musl.cfg -c /tmp/reach.c -o /tmp/reach.o; \
+    sym() { \
+      f=/tmp/sym-$1; \
+      { grep '^#' /tmp/reach.c; echo "void (*const ref)(void) = (void (*)(void))$1;"; } > "$f.c"; \
+      clang --config=/opt/asan-static/musl.cfg -c "$f.c" -o "$f.o"; \
+      s=$(llvm-nm -u "$f.o" | awk '{print $NF}'); \
+      case "$s" in ""|*[!A-Za-z0-9_]*) echo "an object that refers to $1 has the undefined symbols [$s], not one" >&2; return 1 ;; esac; \
+      echo "$s"; \
+    }; \
+    s_create=$(sym timer_create); \
+    s_gettime=$(sym timer_gettime); \
+    s_settime=$(sym timer_settime); \
+    s_clock=$(sym clock_gettime); \
+    s_localtime_r=$(sym localtime_r); \
+    wrap=$(clang --target="$TRIPLE" -resource-dir="$STATIC_RESOURCE_DIR" -print-runtime-dir)/libclang_rt.asan.a.wrap; \
+    if [ -e /opt/asan-static/RUNTIME-UNVERIFIED ]; then \
+      echo "timer_create, the thread joins, time and the redirected names: built, not run (RUNTIME-UNVERIFIED)"; \
+    else \
+      run() { \
+        log=$1; shift; st=0; \
+        ASAN_OPTIONS=detect_leaks=0 timeout -s KILL 60 "$@" > "$log" 2>&1 || st=$?; \
+        echo "exit status $st" >> "$log"; \
+      }; \
+      check() { \
+        log=$1 pass=$2 fail=$3; shift 3; \
+        for re in "$@"; do \
+          grep -qE -- "$re" "$log" || { echo "$fail" >&2; cat "$log" >&2; return 1; }; \
+        done; \
+        echo "$pass"; \
+      }; \
+      inc='sanitizer_common_interceptors\.inc'; \
+      ok1=0 ok2=0 ok3=0 ok4=0 ok5=0 ok6=0 ok7=0 ok8=0 ok9=1 ok10=1; \
+      run /tmp/timers-poisoned-timerid.log /tmp/timers poisoned-timerid; \
+      if check /tmp/timers-poisoned-timerid.log \
+           "timer_create into a poisoned timerid reports use-after-poison from the timer_create interceptor" \
+           "timer_create into a poisoned timerid did not report from the timer_create interceptor:" \
+           "ERROR: AddressSanitizer: use-after-poison" "#0 .*[ _]$s_create .*$inc" "#[0-9]+ .* in main .*timers\.c"; \
+      then ok1=1; fi; \
+      run /tmp/timers-short-timerid.log /tmp/timers short-timerid; \
+      if check /tmp/timers-short-timerid.log \
+           "timer_create into a timerid one byte short reports heap-buffer-overflow from the $s_create interceptor" \
+           "timer_create into a timerid one byte short did not report heap-buffer-overflow from the $s_create interceptor:" \
+           "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_create .*$inc"; \
+      then ok2=1; fi; \
+      run /tmp/timers-short-curr-value.log /tmp/timers short-curr-value; \
+      if check /tmp/timers-short-curr-value.log \
+           "timer_gettime into a curr_value one byte short reports heap-buffer-overflow from the $s_gettime interceptor" \
+           "timer_gettime into a curr_value one byte short did not report heap-buffer-overflow from the $s_gettime interceptor:" \
+           "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_gettime .*$inc"; \
+      then ok3=1; fi; \
+      run /tmp/timers-short-old-value.log /tmp/timers short-old-value; \
+      if check /tmp/timers-short-old-value.log \
+           "timer_settime into an old_value one byte short reports heap-buffer-overflow from the $s_settime interceptor" \
+           "timer_settime into an old_value one byte short did not report heap-buffer-overflow from the $s_settime interceptor:" \
+           "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_settime .*$inc"; \
+      then ok4=1; fi; \
+      run /tmp/timers-correct.log /tmp/timers correct; \
+      if check /tmp/timers-correct.log \
+           "a correct timer_create, timer_settime, timer_gettime and timer_delete do not report" \
+           "a correct timer_create, timer_settime, timer_gettime and timer_delete did not print timer ok and exit 0:" \
+           "^timer ok$" "^exit status 0$"; \
+      then ok5=1; fi; \
+      run /tmp/joins.log /tmp/joins; \
+      if check /tmp/joins.log \
+           "a pthread_join after a successful pthread_tryjoin_np reports the second join and exits 1" \
+           "a pthread_join after a successful pthread_tryjoin_np did not report:" \
+           "ERROR: AddressSanitizer: Joining already joined thread" "^exit status 1$"; \
+      then ok6=1; fi; \
+      run /tmp/time-t-time.log /tmp/time-t time; \
+      if check /tmp/time-t-time.log \
+           "time returns the value that it stores, and the value is a current time" \
+           "time did not return the value it stored:" \
+           "^time returned 0x[0-9a-f]{16} and stored 0x[0-9a-f]{16}$" "^exit status 0$"; \
+      then ok7=1; fi; \
+      run /tmp/time-t-poisoned-time-t.log /tmp/time-t poisoned-time-t; \
+      if check /tmp/time-t-poisoned-time-t.log \
+           "localtime_r checks all 8 bytes of time_t: a READ of size 8 reports from the $s_localtime_r interceptor" \
+           "localtime_r did not check all 8 bytes of time_t:" \
+           "ERROR: AddressSanitizer: " "READ of size 8 " "#0 .*[ _]$s_localtime_r .*$inc"; \
+      then ok8=1; fi; \
+      set -- $(llvm-nm -u /tmp/reach.o | awk '{print $NF}'); \
+      refs=" $* "; \
+      if [ $# -ne 28 ]; then echo "reach: the object refers to $# symbols, not 28: $*" >&2; ok9=0; fi; \
+      for pair in $reach; do \
+        plain=${pair%%:*}; \
+        case "$TRIPLE" in armv7*) want=${pair#*:} ;; *) want=$plain ;; esac; \
+        why=; \
+        case "$refs" in *" $want "*) ;; *) why="$why, the object does not refer to $want" ;; esac; \
+        grep -qx -- "--wrap=$want" "$wrap" || why="$why, the wrap list has no --wrap=$want"; \
+        if [ "$want" != "$plain" ] && grep -qx -- "--wrap=$plain" "$wrap"; then why="$why, the wrap list has --wrap=$plain"; fi; \
+        if [ -n "$why" ]; then echo "reach: $plain:${why#,}" >&2; ok9=0; fi; \
+      done; \
+      if [ "$ok9" = 1 ]; then \
+        case "$TRIPLE" in \
+          armv7*) echo "the object refers to the __*64 name of each of the 28 functions, and the wrap list holds each of these names and none of the plain names" ;; \
+          *) echo "the object refers to the plain name of each of the 28 functions, and the wrap list holds each of these names" ;; \
+        esac; \
+      fi; \
+      check /tmp/timers-short-old-value.log \
+        "timer_settime reaches the $s_settime interceptor, which reports an old_value one byte short" \
+        "reach: timer_settime: an old_value one byte short did not report heap-buffer-overflow from the $s_settime interceptor:" \
+        "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_settime .*$inc" \
+        || ok10=0; \
+      run /tmp/time-t-short-timespec.log /tmp/time-t short-timespec; \
+      check /tmp/time-t-short-timespec.log \
+        "clock_gettime reaches the $s_clock interceptor, which reports a struct timespec one byte short" \
+        "reach: clock_gettime: a struct timespec one byte short did not report heap-buffer-overflow from the $s_clock interceptor:" \
+        "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_clock .*$inc" \
+        || ok10=0; \
+      run /tmp/time-t-short-tm.log /tmp/time-t short-tm; \
+      check /tmp/time-t-short-tm.log \
+        "localtime_r reaches the $s_localtime_r interceptor, which reports a struct tm one byte short" \
+        "reach: localtime_r: a struct tm one byte short did not report heap-buffer-overflow from the $s_localtime_r interceptor:" \
+        "ERROR: AddressSanitizer: heap-buffer-overflow" "#[01] .*[ _]$s_localtime_r .*$inc" \
+        || ok10=0; \
+      if [ "$ok1$ok2$ok5" = 111 ]; then echo "timer_create is intercepted and reports; a correct timer does not report"; fi; \
+      if [ "$ok3$ok4" = 11 ]; then echo "timer_gettime and timer_settime are intercepted and report"; fi; \
+      if [ "$ok6" = 1 ]; then echo "a second join after pthread_tryjoin_np is reported"; fi; \
+      if [ "$ok7$ok8" = 11 ]; then echo "time and localtime_r use the libc's 64-bit time_t"; fi; \
+      if [ "$ok9$ok10" = 11 ]; then echo "the 28 redirected functions reach their interceptors"; fi; \
+      [ "$ok1$ok2$ok3$ok4$ok5$ok6$ok7$ok8$ok9$ok10" = 1111111111 ] || exit 1; \
     fi
 
 # MemorySanitizer test, on the targets that have an msan runtime (x86_64 and
