@@ -2028,7 +2028,7 @@ RUN set -eu; \
       run /tmp/joins.log /tmp/joins; \
       check /tmp/joins.log \
         "a pthread_join after a successful pthread_tryjoin_np reports the second join and exits 1" \
-        "a pthread_join after a successful pthread_tryjoin_np did not report:" \
+        "a pthread_join after a successful pthread_tryjoin_np did not report, or pthread_tryjoin_np did not join the thread first:" \
         "^pthread_tryjoin_np joined the thread after [0-9]+ tries$" \
         "ERROR: AddressSanitizer: Joining already joined thread" "^exit status 1$" \
         || { ok6=0; failed=$((failed + 1)); }; \
