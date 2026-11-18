@@ -206,11 +206,12 @@ detail.
 
 With `VERIFY_RUNTIME=defer`, the build goes on when the interceptor check cannot start
 its static ASan binary. The later steps that run ASan programs (the `std::string` step,
-the `qsort` step, and the timer, join and time step) then build their programs and do
-not run them. An ASan binary reserves about 14TiB of shadow memory on a 64-bit target.
-If the Docker daemon sets an `RLIMIT_AS` that is smaller, the binary cannot start. With
-`defer`, the image contains `/opt/asan-static/RUNTIME-UNVERIFIED`, which records that
-the check did not run. The MemorySanitizer check on x86_64 and aarch64 follows the
+the `qsort` step, and the timer, join and time step) then build their programs and run
+none of their checks, the wrap list checks included. An ASan binary reserves about 14TiB
+of shadow memory on a 64-bit target. If the Docker daemon sets an `RLIMIT_AS` that is
+smaller, the binary cannot start. With `defer`, the image contains
+`/opt/asan-static/RUNTIME-UNVERIFIED`, which records that these checks did not run. The
+MemorySanitizer check on x86_64 and aarch64 follows the
 same rule: when no run of one of its binaries passes under a set `RLIMIT_AS`, and the
 runs that missed could not map MSan's shadow (plain) or spun (sealed), `require`
 fails the build and `defer` appends that binary to `RUNTIME-UNVERIFIED`. A cross

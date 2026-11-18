@@ -34,9 +34,11 @@
 # GNU ld, the musl loader, GCC's builtins -- is fetched from Alpine's repository
 # for APK_ARCH in section 0a, at the same pinned versions the target's own image
 # installs, so a cross-built image reads the same files a native one does.
-# armv7 is the one architecture that changed anything else, in one place: the
+# armv7 is the one architecture that changed anything else, in two places: the
 # CAN_TARGET_* settings in section 3, which name architectures rather than being
-# chosen per architecture, and are explained there.  The one other thing that is
+# chosen per architecture, and are explained there, and check 9 of the timer,
+# join and time step in section 6, which on armv7 expects the __*64 names that
+# musl's headers give 28 time functions.  The one other thing that is
 # not portable is not in this file: ASan on riscv64 takes the dynamic-shadow
 # path and its allocator reserves 128GB, so the four verification steps below
 # that run an ASan binary (the interceptor check, the std::string check, the
@@ -1441,12 +1443,15 @@ RUN set -eu; \
         "" \
         "Because this file exists, the later build steps that run ASan programs" \
         "(the std::string step, the qsort step, and the timer, join and time step)" \
-        "built their programs and did not run them." \
+        "built their programs and ran none of their checks, the wrap list checks" \
+        "of the qsort step and of the timer, join and time step included." \
         "" \
         "Nothing has shown that this toolchain attaches its interceptors.  Before" \
         "trusting it, run /tmp/attach, the program of the build-time check, from a" \
         "docker run of this image under an RLIMIT_AS that is not small, and require" \
-        "its report: a WRITE of size 100 from the memcpy interceptor." \
+        "its report: a WRITE of size 100 from the memcpy interceptor.  The checks" \
+        "of the three later steps run only in a build on a host that can start an" \
+        "ASan binary." \
         > /opt/asan-static/RUNTIME-UNVERIFIED; \
       echo "interceptors NOT verified: see /opt/asan-static/RUNTIME-UNVERIFIED"; \
     else \
@@ -1551,8 +1556,8 @@ RUN set -eu; \
 # by the program's output and exit status (for check 6, the path of the wrap
 # list).  The step runs all six checks and then fails if any of them failed,
 # so a build without 0029 shows which checks need it.  Each program runs
-# under timeout -s KILL 60.  The programs run only when the interceptor check
-# above could run its binary.
+# under timeout -s KILL 60.  All six checks, check 6 included, run only when
+# the interceptor check above could run its binary.
 RUN set -eu; \
     printf '%s\n' \
       '#define _GNU_SOURCE' \
@@ -1789,8 +1794,9 @@ RUN set -eu; \
 # does not refer to exactly 28 symbols.  The step runs every check and then
 # fails if any of them failed, so a build without one of the patches shows
 # which checks need it.  It prints one summary line for each group of checks
-# that all passed.  Each program runs under timeout -s KILL 60.  The programs
-# run only when the interceptor check above could run its binary.
+# that all passed.  Each program runs under timeout -s KILL 60.  All ten
+# checks, check 9 included, run only when the interceptor check above could
+# run its binary.
 RUN set -eu; \
     printf '%s\n' \
       '#define _GNU_SOURCE' \
