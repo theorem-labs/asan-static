@@ -1740,6 +1740,8 @@ RUN set -eu; \
 #   6. joins.c starts a thread that returns at once, calls pthread_tryjoin_np
 #      until it joins the thread, and then calls pthread_join on the same
 #      thread.  ASan must report "Joining already joined thread" and exit 1.
+#      The check also requires the program's line that pthread_tryjoin_np
+#      joined the thread, so a report from the first join does not pass.
 # The ASan interceptor of each join records a successful join, so the next
 # join of that thread reports.  Without 0031, pthread_tryjoin_np goes straight
 # to musl, ASan still holds the thread as joinable, and the second join is
@@ -1749,7 +1751,7 @@ RUN set -eu; \
 # The time_t checks (patch 0032):
 #   7. time(&t), with t set to all ones first, must return the value that it
 #      stores in t, and that value must be a time between 1700000000 and
-#      4102444800.  The program runs under alarm(30).
+#      4102444800.
 #   8. localtime_r reads the current time from an 8-byte heap block whose
 #      last 4 bytes are poisoned.  It must report a READ of size 8 from the
 #      localtime_r interceptor.
@@ -1884,7 +1886,6 @@ RUN set -eu; \
       '#include <stdlib.h>' \
       '#include <string.h>' \
       '#include <time.h>' \
-      '#include <unistd.h>' \
       'void __asan_poison_memory_region(void const volatile *, size_t);' \
       '_Static_assert(sizeof(time_t) == 8, "time_t is not 64 bits");' \
       'static int fail(const char *call) {' \
@@ -1897,7 +1898,6 @@ RUN set -eu; \
       '  const char *mode = argc > 1 ? argv[1] : "";' \
       '  if (!strcmp(mode, "time")) {' \
       '    time_t t, r;' \
-      '    alarm(30);' \
       '    memset(&t, 0xff, sizeof t);' \
       '    r = time(&t);' \
       '    printf("time returned 0x%016llx and stored 0x%016llx\n", (unsigned long long)r, (unsigned long long)t);' \
@@ -1939,20 +1939,21 @@ RUN set -eu; \
       time:__time64 timer_gettime:__timer_gettime64 timer_settime:__timer_settime64 \
       timerfd_gettime:__timerfd_gettime64 timerfd_settime:__timerfd_settime64 \
       timespec_get:__timespec_get_time64 wait3:__wait3_time64 wait4:__wait4_time64"; \
+    heads=$(printf '%s\n' \
+      '#define _GNU_SOURCE' \
+      '#include <poll.h>' \
+      '#include <pthread.h>' \
+      '#include <semaphore.h>' \
+      '#include <signal.h>' \
+      '#include <sys/socket.h>' \
+      '#include <sys/stat.h>' \
+      '#include <sys/time.h>' \
+      '#include <sys/timeb.h>' \
+      '#include <sys/timerfd.h>' \
+      '#include <sys/wait.h>' \
+      '#include <time.h>'); \
     { \
-      printf '%s\n' \
-        '#define _GNU_SOURCE' \
-        '#include <poll.h>' \
-        '#include <pthread.h>' \
-        '#include <semaphore.h>' \
-        '#include <signal.h>' \
-        '#include <sys/socket.h>' \
-        '#include <sys/stat.h>' \
-        '#include <sys/time.h>' \
-        '#include <sys/timeb.h>' \
-        '#include <sys/timerfd.h>' \
-        '#include <sys/wait.h>' \
-        '#include <time.h>' \
+      printf '%s\n' "$heads" \
         'typedef void (*fn)(void);' \
         'fn const reach[] = {'; \
       for pair in $reach; do printf '  (fn)%s,\n' "${pair%%:*}"; done; \
@@ -1964,7 +1965,7 @@ RUN set -eu; \
     clang --config=/opt/asan-static/musl.cfg -c /tmp/reach.c -o /tmp/reach.o; \
     sym() { \
       f=/tmp/sym-$1; \
-      { grep '^#' /tmp/reach.c; echo "void (*const ref)(void) = (void (*)(void))$1;"; } > "$f.c"; \
+      printf '%s\n' "$heads" "void (*const ref)(void) = (void (*)(void))$1;" > "$f.c"; \
       clang --config=/opt/asan-static/musl.cfg -c "$f.c" -o "$f.o"; \
       s=$(llvm-nm -u "$f.o" | awk '{print $NF}'); \
       case "$s" in ""|*[!A-Za-z0-9_]*) echo "an object that refers to $1 has the undefined symbols [$s], not one" >&2; return 1 ;; esac; \
@@ -1993,54 +1994,56 @@ RUN set -eu; \
       }; \
       inc='sanitizer_common_interceptors\.inc'; \
       ok1=1 ok2=1 ok3=1 ok4=1 ok5=1 ok6=1 ok7=1 ok8=1 ok9=1 ok10=1; \
+      failed=0; \
       run /tmp/timers-poisoned-timerid.log /tmp/timers poisoned-timerid; \
       check /tmp/timers-poisoned-timerid.log \
         "timer_create into a poisoned timerid reports use-after-poison from the timer_create interceptor" \
         "timer_create into a poisoned timerid did not report from the timer_create interceptor:" \
         "ERROR: AddressSanitizer: use-after-poison" "#0 .*[ _]$s_create .*$inc" "#[0-9]+ .* in main .*timers\.c" \
-        || ok1=0; \
+        || { ok1=0; failed=$((failed + 1)); }; \
       run /tmp/timers-short-timerid.log /tmp/timers short-timerid; \
       check /tmp/timers-short-timerid.log \
         "timer_create into a timerid one byte short reports heap-buffer-overflow from the $s_create interceptor" \
         "timer_create into a timerid one byte short did not report heap-buffer-overflow from the $s_create interceptor:" \
         "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_create .*$inc" \
-        || ok2=0; \
+        || { ok2=0; failed=$((failed + 1)); }; \
       run /tmp/timers-short-curr-value.log /tmp/timers short-curr-value; \
       check /tmp/timers-short-curr-value.log \
         "timer_gettime into a curr_value one byte short reports heap-buffer-overflow from the $s_gettime interceptor" \
         "timer_gettime into a curr_value one byte short did not report heap-buffer-overflow from the $s_gettime interceptor:" \
         "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_gettime .*$inc" \
-        || ok3=0; \
+        || { ok3=0; failed=$((failed + 1)); }; \
       run /tmp/timers-short-old-value.log /tmp/timers short-old-value; \
       check /tmp/timers-short-old-value.log \
         "timer_settime into an old_value one byte short reports heap-buffer-overflow from the $s_settime interceptor" \
         "timer_settime into an old_value one byte short did not report heap-buffer-overflow from the $s_settime interceptor:" \
         "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_settime .*$inc" \
-        || ok4=0; \
+        || { ok4=0; failed=$((failed + 1)); }; \
       run /tmp/timers-correct.log /tmp/timers correct; \
       check /tmp/timers-correct.log \
         "a correct timer_create, timer_settime, timer_gettime and timer_delete do not report" \
         "a correct timer_create, timer_settime, timer_gettime and timer_delete did not print timer ok and exit 0:" \
         "^timer ok$" "^exit status 0$" \
-        || ok5=0; \
+        || { ok5=0; failed=$((failed + 1)); }; \
       run /tmp/joins.log /tmp/joins; \
       check /tmp/joins.log \
         "a pthread_join after a successful pthread_tryjoin_np reports the second join and exits 1" \
         "a pthread_join after a successful pthread_tryjoin_np did not report:" \
+        "^pthread_tryjoin_np joined the thread after [0-9]+ tries$" \
         "ERROR: AddressSanitizer: Joining already joined thread" "^exit status 1$" \
-        || ok6=0; \
+        || { ok6=0; failed=$((failed + 1)); }; \
       run /tmp/time-t-time.log /tmp/time-t time; \
       check /tmp/time-t-time.log \
         "time returns the value that it stores, and the value is a current time" \
         "time did not return the value it stored, or that value is not a current time:" \
         "^time returned 0x[0-9a-f]{16} and stored 0x[0-9a-f]{16}$" "^exit status 0$" \
-        || ok7=0; \
+        || { ok7=0; failed=$((failed + 1)); }; \
       run /tmp/time-t-poisoned-time-t.log /tmp/time-t poisoned-time-t; \
       check /tmp/time-t-poisoned-time-t.log \
         "localtime_r checks all 8 bytes of time_t: a READ of size 8 reports from the $s_localtime_r interceptor" \
         "localtime_r did not check all 8 bytes of time_t:" \
         "ERROR: AddressSanitizer: " "READ of size 8 " "#0 .*[ _]$s_localtime_r .*$inc" \
-        || ok8=0; \
+        || { ok8=0; failed=$((failed + 1)); }; \
       set -- $(llvm-nm -u /tmp/reach.o | awk '{print $NF}'); \
       refs=" $* "; \
       if [ $# -ne 28 ]; then echo "reach: the object refers to $# symbols, not 28: $*" >&2; ok9=0; fi; \
@@ -2058,30 +2061,32 @@ RUN set -eu; \
           armv7*) echo "the object refers to the __*64 name of each of the 28 functions, and the wrap list holds each of these names and none of the plain names" ;; \
           *) echo "the object refers to the plain name of each of the 28 functions, and the wrap list holds each of these names" ;; \
         esac; \
+      else \
+        failed=$((failed + 1)); \
       fi; \
       check /tmp/timers-short-old-value.log \
         "timer_settime reaches the $s_settime interceptor, which reports an old_value one byte short" \
         "reach: timer_settime: an old_value one byte short did not report heap-buffer-overflow from the $s_settime interceptor:" \
         "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_settime .*$inc" \
-        || ok10=0; \
+        || { ok10=0; failed=$((failed + 1)); }; \
       run /tmp/time-t-short-timespec.log /tmp/time-t short-timespec; \
       check /tmp/time-t-short-timespec.log \
         "clock_gettime reaches the $s_clock interceptor, which reports a struct timespec one byte short" \
         "reach: clock_gettime: a struct timespec one byte short did not report heap-buffer-overflow from the $s_clock interceptor:" \
         "ERROR: AddressSanitizer: heap-buffer-overflow" "#0 .*[ _]$s_clock .*$inc" \
-        || ok10=0; \
+        || { ok10=0; failed=$((failed + 1)); }; \
       run /tmp/time-t-short-tm.log /tmp/time-t short-tm; \
       check /tmp/time-t-short-tm.log \
         "localtime_r reaches the $s_localtime_r interceptor, which reports a struct tm one byte short" \
         "reach: localtime_r: a struct tm one byte short did not report heap-buffer-overflow from the $s_localtime_r interceptor:" \
         "ERROR: AddressSanitizer: heap-buffer-overflow" "#[01] .*[ _]$s_localtime_r .*$inc" \
-        || ok10=0; \
+        || { ok10=0; failed=$((failed + 1)); }; \
       if [ "$ok1$ok2$ok5" = 111 ]; then echo "timer_create is intercepted and reports; a correct timer does not report"; fi; \
       if [ "$ok3$ok4" = 11 ]; then echo "timer_gettime and timer_settime are intercepted and report"; fi; \
       if [ "$ok6" = 1 ]; then echo "a second join after pthread_tryjoin_np is reported"; fi; \
       if [ "$ok7$ok8" = 11 ]; then echo "time and localtime_r use the libc's 64-bit time_t"; fi; \
       if [ "$ok9$ok10" = 11 ]; then echo "the 28 redirected functions reach their interceptors"; fi; \
-      [ "$ok1$ok2$ok3$ok4$ok5$ok6$ok7$ok8$ok9$ok10" = 1111111111 ] || exit 1; \
+      [ "$failed" = 0 ] || exit 1; \
     fi
 
 # MemorySanitizer test, on the targets that have an msan runtime (x86_64 and
