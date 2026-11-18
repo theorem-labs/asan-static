@@ -1,0 +1,132 @@
+From aa19ac28c8ce747a9e620378be3ce5ef544941ae Mon Sep 17 00:00:00 2001
+From: Theorem Labs
+Date: Tue, 17 Nov 2026 21:45:40 +0000
+Subject: [PATCH] [sanitizer_common] use the libc's time_t in seven time
+ interceptors
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+🤖: Seven interceptors in sanitizer_common_interceptors.inc give time_t
+the type unsigned long: time, localtime, localtime_r, gmtime, gmtime_r,
+ctime and ctime_r (lines 1330-1340 and 1358-1423).  Their gates,
+SANITIZER_INTERCEPT_TIME and SANITIZER_INTERCEPT_LOCALTIME_AND_FRIENDS,
+are SI_POSIX, so the musl runtime has all seven.
+
+On 32-bit musl, time_t has 64 bits and unsigned long has 32 bits.  On
+armv7, musl's headers send calls of time to __time64
+(include/time.h:136).  The renames at the top of the .inc (lines 164-232)
+attach the time interceptor there.  The interceptor passes a 4-byte local
+to __time64, and __time64 writes 8 bytes into it.  The interceptor then
+stores 4 bytes into *t.  It returns 32 bits, where the caller reads 64.
+
+On armv7 the renames also attach the other six under __localtime64,
+__localtime64_r, __gmtime64, __gmtime64_r, __ctime64 and __ctime64_r
+(include/time.h:139-148).  Each of them checks only 4 of the 8 bytes of
+*timep.
+
+Give the seven interceptors __sanitizer_time_t where they now use
+unsigned long for a time_t: the return type, the parameter, the local and
+the -1 test of time, and the timep parameter of the other six.  Nothing
+else changes, except that two declarations now wrap at 80 columns.
+
+__sanitizer_time_t follows the libc's time_t
+(sanitizer_platform_limits_posix.h:386-390).  It is long long for a Linux
+libc that is not glibc or Android, for x32 and for Hexagon.  It is long
+otherwise.  So on the 64-bit targets, and on a glibc target whose time_t
+is a long, each type keeps its width, and the interceptors do the same
+as before.
+
+Patch 0011 made the same fix for mktime.  Its message says that mktime is
+the only interceptor in this file that returns a time_t as a long, and that
+the rest of the time-related ones return an int or write through a pointer.
+That is not correct for the seven interceptors that this patch fixes.  time
+also returns a time_t, as an unsigned long, and the six others read a
+time_t through an unsigned long *.
+
+Like patches 0030 and 0031, this patch changes libclang_rt.asan.a.  A
+toolchain that has it is a new toolchain version.
+
+Line numbers in this message are those of llvmorg-20.1.8 and of musl
+f21a9653.
+---
+ .../sanitizer_common_interceptors.inc         | 22 ++++++++++---------
+ 1 file changed, 12 insertions(+), 10 deletions(-)
+
+diff --git a/compiler-rt/lib/sanitizer_common/sanitizer_common_interceptors.inc b/compiler-rt/lib/sanitizer_common/sanitizer_common_interceptors.inc
+index 3041bec2a..92721402c 100644
+--- a/compiler-rt/lib/sanitizer_common/sanitizer_common_interceptors.inc
++++ b/compiler-rt/lib/sanitizer_common/sanitizer_common_interceptors.inc
+@@ -1327,12 +1327,12 @@ INTERCEPTOR(int, prctl, int option, unsigned long arg2, unsigned long arg3,
+ #endif  // SANITIZER_INTERCEPT_PRCTL
+ 
+ #if SANITIZER_INTERCEPT_TIME
+-INTERCEPTOR(unsigned long, time, unsigned long *t) {
++INTERCEPTOR(__sanitizer_time_t, time, __sanitizer_time_t *t) {
+   void *ctx;
+   COMMON_INTERCEPTOR_ENTER(ctx, time, t);
+-  unsigned long local_t;
+-  unsigned long res = REAL(time)(&local_t);
+-  if (t && res != (unsigned long)-1) {
++  __sanitizer_time_t local_t;
++  __sanitizer_time_t res = REAL(time)(&local_t);
++  if (t && res != (__sanitizer_time_t)-1) {
+     COMMON_INTERCEPTOR_WRITE_RANGE(ctx, t, sizeof(*t));
+     *t = local_t;
+   }
+@@ -1355,7 +1355,7 @@ static void unpoison_tm(void *ctx, __sanitizer_tm *tm) {
+   }
+ #endif
+ }
+-INTERCEPTOR(__sanitizer_tm *, localtime, unsigned long *timep) {
++INTERCEPTOR(__sanitizer_tm *, localtime, __sanitizer_time_t *timep) {
+   void *ctx;
+   COMMON_INTERCEPTOR_ENTER(ctx, localtime, timep);
+   __sanitizer_tm *res = REAL(localtime)(timep);
+@@ -1365,7 +1365,8 @@ INTERCEPTOR(__sanitizer_tm *, localtime, unsigned long *timep) {
+   }
+   return res;
+ }
+-INTERCEPTOR(__sanitizer_tm *, localtime_r, unsigned long *timep, void *result) {
++INTERCEPTOR(__sanitizer_tm *, localtime_r, __sanitizer_time_t *timep,
++            void *result) {
+   void *ctx;
+   COMMON_INTERCEPTOR_ENTER(ctx, localtime_r, timep, result);
+   __sanitizer_tm *res = REAL(localtime_r)(timep, result);
+@@ -1375,7 +1376,7 @@ INTERCEPTOR(__sanitizer_tm *, localtime_r, unsigned long *timep, void *result) {
+   }
+   return res;
+ }
+-INTERCEPTOR(__sanitizer_tm *, gmtime, unsigned long *timep) {
++INTERCEPTOR(__sanitizer_tm *, gmtime, __sanitizer_time_t *timep) {
+   void *ctx;
+   COMMON_INTERCEPTOR_ENTER(ctx, gmtime, timep);
+   __sanitizer_tm *res = REAL(gmtime)(timep);
+@@ -1385,7 +1386,8 @@ INTERCEPTOR(__sanitizer_tm *, gmtime, unsigned long *timep) {
+   }
+   return res;
+ }
+-INTERCEPTOR(__sanitizer_tm *, gmtime_r, unsigned long *timep, void *result) {
++INTERCEPTOR(__sanitizer_tm *, gmtime_r, __sanitizer_time_t *timep,
++            void *result) {
+   void *ctx;
+   COMMON_INTERCEPTOR_ENTER(ctx, gmtime_r, timep, result);
+   __sanitizer_tm *res = REAL(gmtime_r)(timep, result);
+@@ -1395,7 +1397,7 @@ INTERCEPTOR(__sanitizer_tm *, gmtime_r, unsigned long *timep, void *result) {
+   }
+   return res;
+ }
+-INTERCEPTOR(char *, ctime, unsigned long *timep) {
++INTERCEPTOR(char *, ctime, __sanitizer_time_t *timep) {
+   void *ctx;
+   COMMON_INTERCEPTOR_ENTER(ctx, ctime, timep);
+   // FIXME: under ASan the call below may write to freed memory and corrupt
+@@ -1408,7 +1410,7 @@ INTERCEPTOR(char *, ctime, unsigned long *timep) {
+   }
+   return res;
+ }
+-INTERCEPTOR(char *, ctime_r, unsigned long *timep, char *result) {
++INTERCEPTOR(char *, ctime_r, __sanitizer_time_t *timep, char *result) {
+   void *ctx;
+   COMMON_INTERCEPTOR_ENTER(ctx, ctime_r, timep, result);
+   // FIXME: under ASan the call below may write to freed memory and corrupt

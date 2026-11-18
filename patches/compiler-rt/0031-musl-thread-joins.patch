@@ -1,0 +1,94 @@
+From 948deba873343e77956866057a1a524a227ed7eb Mon Sep 17 00:00:00 2001
+From: Theorem Labs
+Date: Tue, 17 Nov 2026 21:45:40 +0000
+Subject: [PATCH] [asan] intercept pthread_tryjoin_np and pthread_timedjoin_np
+ on musl
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+🤖: ASan intercepts pthread_tryjoin_np and pthread_timedjoin_np only on
+glibc.  asan_interceptors.h:105-110 sets ASAN_INTERCEPT_TRYJOIN and
+ASAN_INTERCEPT_TIMEDJOIN to 1 only when SANITIZER_GLIBC and
+ASAN_INTERCEPT_PTHREAD_CREATE are both true.  musl defines both functions
+with weak_alias (src/thread/pthread_join.c:38-39), and include/pthread.h
+declares them with glibc's arguments (lines 227-228).  So a static musl
+program's calls of these two functions go straight to libc.
+
+ASan uses these interceptors to find a second join of a thread.  ASan
+keeps a record of each joinable thread in ThreadArgRetval
+(sanitizer_thread_arg_retval.cpp).  The interceptors of
+pthread_join, pthread_tryjoin_np and pthread_timedjoin_np call
+asanThreadArgRetval().Join() (asan_interceptors.cpp:290-333).  When the
+join succeeds, Join() calls AfterJoin(), which removes the record.  On a
+later join of the same thread, ThreadArgRetval::BeforeJoin finds no
+record.  It then reports "Joining already joined thread, aborting." and
+stops the program.  It does this when detect_invalid_join is set, and
+that flag is on by default (sanitizer_flags.inc:283).
+
+Without this patch, a successful pthread_tryjoin_np or
+pthread_timedjoin_np on musl does not call Join().  ASan keeps the
+thread's record, so it does not report a second join of that thread.
+The second join is undefined behaviour.
+
+Check musl as well: the condition becomes
+(SANITIZER_GLIBC || SANITIZER_MUSL) && ASAN_INTERCEPT_PTHREAD_CREATE.
+Then ASan reports a second join after a successful pthread_tryjoin_np or
+pthread_timedjoin_np on musl, as it does on glibc.
+
+The second half of the change is in sanitizer_platform_interceptors.h.
+SANITIZER_INTERCEPT_TRYJOIN and SANITIZER_INTERCEPT_TIMEDJOIN (lines
+406-407) become (SI_GLIBC || SANITIZER_MUSL).  These two gates hold the
+same two interceptors of standalone LSan (lsan_interceptors.cpp:497-525),
+which call the same Join().  HWASan sets both gates to 0 itself
+(hwasan_platform_interceptors.h:518-522).  No other runtime reads them.
+
+On 32-bit Arm, musl's include/pthread.h:237 sends calls of
+pthread_timedjoin_np to __pthread_timedjoin_np_time64.
+asan_interceptors.cpp includes sanitizer_common_interceptors.inc at line
+204, before its own interceptor at line 325.  So the renames at the top
+of that .inc (lines 164-232) apply to it too, and on armv7 ASan attaches
+the interceptor as __pthread_timedjoin_np_time64.  lsan_interceptors.cpp
+does not include the .inc, so standalone LSan keeps the plain name.
+pthread_tryjoin_np takes no time argument and keeps its name on every
+target.
+
+Like patch 0030, this patch changes libclang_rt.asan.a.  A toolchain that
+has it is a new toolchain version.
+
+Line numbers in this message are those of llvmorg-20.1.8 and of musl
+f21a9653.
+---
+ compiler-rt/lib/asan/asan_interceptors.h                     | 2 +-
+ .../lib/sanitizer_common/sanitizer_platform_interceptors.h   | 5 +++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/compiler-rt/lib/asan/asan_interceptors.h b/compiler-rt/lib/asan/asan_interceptors.h
+index 3e2386eaf..98aa55d39 100644
+--- a/compiler-rt/lib/asan/asan_interceptors.h
++++ b/compiler-rt/lib/asan/asan_interceptors.h
+@@ -102,7 +102,7 @@ void InitializePlatformInterceptors();
+ # define ASAN_INTERCEPT___STRDUP 0
+ #endif
+ 
+-#if SANITIZER_GLIBC && ASAN_INTERCEPT_PTHREAD_CREATE
++#if (SANITIZER_GLIBC || SANITIZER_MUSL) && ASAN_INTERCEPT_PTHREAD_CREATE
+ # define ASAN_INTERCEPT_TIMEDJOIN 1
+ # define ASAN_INTERCEPT_TRYJOIN 1
+ #else
+diff --git a/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h b/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h
+index 11914c9c0..213f6ea8e 100644
+--- a/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h
++++ b/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h
+@@ -408,8 +408,9 @@ SANITIZER_WEAK_IMPORT void *aligned_alloc(__sanitizer::usize __alignment,
+   (SI_LINUX_NOT_ANDROID || SI_SOLARIS)
+ #define SANITIZER_INTERCEPT_PTHREAD_BARRIERATTR_GETPSHARED \
+   (SI_LINUX_NOT_ANDROID && !SI_NETBSD)
+-#define SANITIZER_INTERCEPT_TRYJOIN SI_GLIBC
+-#define SANITIZER_INTERCEPT_TIMEDJOIN SI_GLIBC
++// musl has pthread_tryjoin_np and pthread_timedjoin_np too.
++#define SANITIZER_INTERCEPT_TRYJOIN (SI_GLIBC || SANITIZER_MUSL)
++#define SANITIZER_INTERCEPT_TIMEDJOIN (SI_GLIBC || SANITIZER_MUSL)
+ #define SANITIZER_INTERCEPT_THR_EXIT SI_FREEBSD
+ #define SANITIZER_INTERCEPT_TMPNAM SI_POSIX
+ #define SANITIZER_INTERCEPT_TMPNAM_R (SI_GLIBC || SI_SOLARIS)

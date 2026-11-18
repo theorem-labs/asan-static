@@ -1,0 +1,80 @@
+From f9a621865334214a289c97cb541bc7dafe0d570e Mon Sep 17 00:00:00 2001
+From: Theorem Labs
+Date: Tue, 17 Nov 2026 21:45:40 +0000
+Subject: [PATCH] [sanitizer_common] intercept timer_create on musl
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+🤖: SANITIZER_INTERCEPT_TIMER_CREATE is SI_GLIBC in llvmorg-20.1.8
+(sanitizer_platform_interceptors.h:263), and no earlier patch of this
+series changes it.  So on musl the runtime has no interceptor of
+timer_create, timer_delete, timer_gettime or timer_settime, and the wrap
+list has none of these names.  A static musl program's calls of these
+functions go straight to libc.  libc writes *timer, *curr_value and
+*old_value in code that ASan does not instrument, so ASan checks none of
+these writes.
+
+The TODO above the gate keeps it at glibc until someone checks the
+timer_t typedefs of other platforms.  For musl f21a9653 these checks pass:
+
+- include/time.h:110-113 declares timer_create, timer_delete,
+  timer_settime and timer_gettime with glibc's prototypes.
+- musl's timer_t is void * (include/alltypes.h.in:40).
+  __sanitizer_timer_t is void * on Linux too
+  (sanitizer_platform_limits_posix.h:1535).
+- sizeof(struct itimerspec) is 32 on x86_64, aarch64, riscv64 and armv7.
+  musl's struct timespec has a 64-bit tv_sec on all four targets, and it
+  pads the long tv_nsec to 64 bits (include/alltypes.h.in:44).  Patch
+  0008 gives __sanitizer_timespec the same layout on 32-bit musl, so
+  sizeof(__sanitizer_itimerspec) is 32 too.  The build test of this
+  toolchain asserts the libc side with a _Static_assert, because a test
+  program cannot name the runtime's type.
+
+Check musl as well.  The gate holds four interceptors
+(sanitizer_common_interceptors.inc:2292-2345).  The timer_create
+interceptor checks the write of *timer when the call succeeds.
+timer_gettime checks the write of *curr_value.  timer_settime checks the
+read of *new_value and the write of *old_value.  timer_delete checks
+nothing.  Outside glibc, COMMON_INTERCEPT_FUNCTION_GLIBC_VER_MIN is a
+plain COMMON_INTERCEPT_FUNCTION (lines 324-326), so the "GLIBC_2.3.3"
+version in INIT_TIMER_CREATE has no effect on musl.
+
+On 32-bit Arm, musl's headers send calls of timer_gettime and
+timer_settime to __timer_gettime64 and __timer_settime64
+(include/time.h:154-155).  The renames at the top of
+sanitizer_common_interceptors.inc (lines 164-232) already map these
+names.  So on armv7 musl the runtime attaches the two interceptors under
+__timer_gettime64 and __timer_settime64.  timer_create and timer_delete
+keep their plain names on every target.
+
+sanitizer_platform_interceptors.h is a shared header.  The runtimes of
+this toolchain that include sanitizer_common_interceptors.inc and keep
+this gate change: ASan (the archive and its wrap list), MSan (the archive
+and its wrap list) and TSan.  HWASan sets the gate to 0 itself
+(hwasan_platform_interceptors.h:203-204), and standalone UBSan does not
+include the .inc.  MemProf also includes the .inc, but this toolchain
+does not build MemProf.  A toolchain that has this patch is a new
+toolchain version.  Its libclang_rt.asan.a is not the archive that the
+earlier binaries linked.
+
+Line numbers in this message are those of llvmorg-20.1.8 and of musl
+f21a9653.
+---
+ .../lib/sanitizer_common/sanitizer_platform_interceptors.h     | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h b/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h
+index 04b2f2790..11914c9c0 100644
+--- a/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h
++++ b/compiler-rt/lib/sanitizer_common/sanitizer_platform_interceptors.h
+@@ -264,7 +264,8 @@ SANITIZER_WEAK_IMPORT void *aligned_alloc(__sanitizer::usize __alignment,
+   (SI_LINUX || SI_FREEBSD || SI_NETBSD)
+ // TODO: This should be SI_POSIX, adding glibc first until I have time
+ // to verify all timer_t typedefs on other platforms.
+-#define SANITIZER_INTERCEPT_TIMER_CREATE SI_GLIBC
++// musl's timer_t is void *, as glibc's is, and its timer_* prototypes match.
++#define SANITIZER_INTERCEPT_TIMER_CREATE (SI_GLIBC || SANITIZER_MUSL)
+ #define SANITIZER_INTERCEPT_GETITIMER SI_POSIX
+ #define SANITIZER_INTERCEPT_TIME SI_POSIX
+ #define SANITIZER_INTERCEPT_TIMESPEC_GET SI_LINUX
